@@ -23,14 +23,14 @@ Maven:
 <dependency>
     <groupId>com.babelqueue</groupId>
     <artifactId>babelqueue-core</artifactId>
-    <version>0.1.0</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 
 Gradle:
 
 ```kotlin
-implementation("com.babelqueue:babelqueue-core:0.1.0")
+implementation("com.babelqueue:babelqueue-core:1.0.0")
 ```
 
 Requires Java **17+**.
