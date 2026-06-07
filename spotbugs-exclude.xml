@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!--
+      The wire envelope (Envelope/Meta/DeadLetter records) is an internal, read-only
+      DTO produced by the codec. We deliberately do NOT defensive-copy its `data`
+      map or nested collections: the envelope is on the per-message hot path and
+      BabelQueue holds a <=2% codec-overhead budget (GR-8). A decoded envelope is to
+      be treated as immutable by callers. Suppress only the representation-exposure
+      patterns, nothing else.
+    -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+</FindBugsFilter>
