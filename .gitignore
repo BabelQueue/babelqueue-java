@@ -8,3 +8,6 @@ target/
 .idea/
 *.iml
 .vscode/
+
+# CommitBrief local config and cache
+.commitbrief/
