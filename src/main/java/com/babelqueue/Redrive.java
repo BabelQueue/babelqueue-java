@@ -2,6 +2,7 @@ package com.babelqueue;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Predicate;
 
 /**
@@ -18,18 +19,30 @@ import java.util.function.Predicate;
  * the {@code otel} module's {@code Sender}. The wire envelope stays frozen (GR-1) and no
  * dependency is added.
  *
- * <p>Safety in v1 is {@code dryRun} + sandbox routing ({@code toQueue}) + {@code select}. The
- * <b>Replay-Bypass</b> guard (a {@code bq-replay-bypass} transport header surfaced to handlers
- * so a replay can skip external side-effects) is a documented phase two — it touches the
- * runtime and every transport, like ADR-0025's {@code traceparent} follow-up.
+ * <p>Safety is {@code dryRun} + sandbox routing ({@code toQueue}) + {@code select}. The
+ * {@code bypass} option stamps a {@code bq-replay-bypass} transport header (see {@link Replay})
+ * so a handler can skip external side-effects on a replay; it takes effect on transports that
+ * implement {@link HeaderPublisher} (ADR-0027).
  */
 public final class Redrive {
 
     private Redrive() {
     }
 
-    /** A reserved DLQ message: its raw body plus a transport-specific handle used to ack it. */
-    public record Reserved(String body, Object handle) {
+    /**
+     * A reserved DLQ message: its raw body, a transport-specific handle used to ack it, and any
+     * out-of-band transport headers (e.g. the replay-bypass marker; empty when none).
+     */
+    public record Reserved(String body, Object handle, Map<String, String> headers) {
+
+        /** A reserved message with no out-of-band headers. */
+        public Reserved(String body, Object handle) {
+            this(body, handle, Map.of());
+        }
+
+        public Reserved {
+            headers = headers == null ? Map.of() : Map.copyOf(headers);
+        }
     }
 
     /** The minimal transport surface {@link #redrive} needs, implemented over any broker. */
@@ -46,6 +59,16 @@ public final class Redrive {
     }
 
     /**
+     * An optional {@link Transport} capability: publish a body together with out-of-band transport
+     * headers (e.g. the replay-bypass marker), for brokers that carry per-message metadata. A
+     * transport that does not implement it simply does not propagate headers — {@link #redrive}
+     * falls back to plain {@link Transport#publish} (ADR-0027).
+     */
+    public interface HeaderPublisher {
+        void publishWithHeaders(String queue, String body, Map<String, String> headers) throws Exception;
+    }
+
+    /**
      * Options for a {@link #redrive} run; immutable, built with the fluent withers from
      * {@link #all()}.
      *
@@ -54,28 +77,34 @@ public final class Redrive {
      * @param max     caps how many messages are pulled from the DLQ (0 = all available)
      * @param dryRun  inspect and report the plan, restoring every message unchanged
      * @param select  picks which messages to redrive (unselected are restored unchanged)
+     * @param bypass  stamps the bq-replay-bypass header on each redriven message (see
+     *                {@link Replay}); a no-op unless the transport is a {@link HeaderPublisher}
      */
-    public record Options(String toQueue, int max, boolean dryRun, Predicate<Envelope> select) {
+    public record Options(String toQueue, int max, boolean dryRun, Predicate<Envelope> select, boolean bypass) {
 
         /** Redrive every message back to its source queue. */
         public static Options all() {
-            return new Options(null, 0, false, null);
+            return new Options(null, 0, false, null, false);
         }
 
         public Options toQueue(String queue) {
-            return new Options(queue, max, dryRun, select);
+            return new Options(queue, max, dryRun, select, bypass);
         }
 
         public Options max(int limit) {
-            return new Options(toQueue, limit, dryRun, select);
+            return new Options(toQueue, limit, dryRun, select, bypass);
         }
 
         public Options dryRun(boolean enabled) {
-            return new Options(toQueue, max, enabled, select);
+            return new Options(toQueue, max, enabled, select, bypass);
         }
 
         public Options select(Predicate<Envelope> predicate) {
-            return new Options(toQueue, max, dryRun, predicate);
+            return new Options(toQueue, max, dryRun, predicate, bypass);
+        }
+
+        public Options bypass(boolean enabled) {
+            return new Options(toQueue, max, dryRun, select, enabled);
         }
     }
 
@@ -87,7 +116,8 @@ public final class Redrive {
         String reason,
         String from,
         String to,
-        boolean redriven
+        boolean redriven,
+        boolean bypassed
     ) {
     }
 
@@ -141,7 +171,7 @@ public final class Redrive {
                 transport.publish(dlq, msg.body());
                 transport.ack(msg);
                 skipped++;
-                items.add(new Item(null, null, null, null, dlq, null, false));
+                items.add(new Item(null, null, null, null, dlq, null, false, false));
                 continue;
             }
 
@@ -152,7 +182,7 @@ public final class Redrive {
                 transport.publish(dlq, msg.body());
                 transport.ack(msg);
                 skipped++;
-                items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, null, false));
+                items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, null, false, false));
                 continue;
             }
 
@@ -164,12 +194,19 @@ public final class Redrive {
                 transport.publish(dlq, msg.body());
                 transport.ack(msg);
                 skipped++;
-                items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, target, false));
+                items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, target, false, false));
                 continue;
             }
 
+            boolean bypassed = false;
             try {
-                transport.publish(target, EnvelopeCodec.encode(reset(env)));
+                String encoded = EnvelopeCodec.encode(reset(env));
+                if (opts.bypass() && transport instanceof HeaderPublisher hp) {
+                    hp.publishWithHeaders(target, encoded, Map.of(Replay.HEADER_REPLAY_BYPASS, "1"));
+                    bypassed = true;
+                } else {
+                    transport.publish(target, encoded);
+                }
             } catch (Exception publishFailure) {
                 transport.publish(dlq, msg.body());
                 transport.ack(msg);
@@ -177,7 +214,7 @@ public final class Redrive {
             }
             transport.ack(msg);
             redriven++;
-            items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, target, true));
+            items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, target, true, bypassed));
         }
 
         return new Result(redriven, skipped, items);
