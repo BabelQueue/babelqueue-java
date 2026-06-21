@@ -146,6 +146,49 @@ the broker, then at-least-once on the wire as always — consumers still dedupe 
 (`SELECT … FOR UPDATE SKIP LOCKED`) is the adapter's job; the in-memory reference store does
 not implement it.
 
+### GDPR field encryption (optional)
+
+The `com.babelqueue.gdpr` helper (ADR-0030) is the **runtime, SDK-enforcement** half of
+the registry's `x-gdpr-sensitive` declaration: a producer encrypts each marked `data`
+field before publish, a consumer decrypts it after decode. The registry only *declares*
+which fields are personal data; this enforces it on the wire. It is standalone and
+**opt-in** — call it, or don't.
+
+```java
+import com.babelqueue.gdpr.*;
+import com.babelqueue.schema.*;
+
+// The Cipher is YOURS — a seam onto KMS/Vault/HSM/tokenisation. The core ships a JDK-only
+// reference (AES-256-GCM, random 12-byte IV prepended, Base64) so it pulls no crypto dep (GR-7).
+Cipher cipher = new AesGcmCipher(key); // key is 16/24/32 bytes; the caller owns it
+
+Map<String, Object> schema = provider.schemaFor(env.job());  // the same per-URN schema you validate against
+if (schema != null) {
+    // Producer — validate CLEARTEXT first, then encrypt the marked leaves in place:
+    SchemaValidation.validate(provider, env.job(), env.data());
+    Gdpr.protect(env.data(), schema, cipher);
+}
+String body = EnvelopeCodec.encode(env);                     // ciphertext rides inside data
+
+// Consumer — decrypt the marked leaves in place AFTER decode, BEFORE the handler reads data:
+Envelope in = EnvelopeCodec.decode(body);
+Map<String, Object> inSchema = provider.schemaFor(in.job());
+if (inSchema != null) {
+    Gdpr.unprotect(in.data(), inSchema, cipher);             // wrong key → DecryptException (retry/DLQ)
+}
+```
+
+The wire envelope stays **frozen** (GR-1): only the **value** of a sensitive field changes
+— it becomes a ciphertext **string**, so `data` is still pure JSON (GR-3) and any SDK can
+carry the envelope even without the key. `meta.schema_version` stays `1` and `trace_id` is
+untouched (GR-4). Each leaf is canonically JSON-encoded before encryption and decoded back
+after, so `protect` → `unprotect` restores the value **byte-for-byte** (a number comes back a
+number, an object an object). The sensitive paths come from the schema's `x-gdpr-sensitive`
+marks (`SensitivePaths.of(schema)` — nested objects, array items `field[]`, and the root),
+which are **validation-neutral** so annotating a schema is never a breaking change. Validate
+cleartext **before** `protect` / **after** `unprotect`: a schema that constrains a sensitive
+field (`minLength`, `enum`, …) would reject the ciphertext string otherwise.
+
 ## What this core is (and isn't)
 
 It enforces the **contract**: the envelope shape, URN identity, trace propagation,

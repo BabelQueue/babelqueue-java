@@ -9,6 +9,34 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-06-21
+
+### Added
+- **Runtime GDPR field encryption** (ADR-0030) in the new optional `com.babelqueue.gdpr`
+  module — the **SDK-enforcement** half of the registry's `x-gdpr-sensitive` declaration.
+  babelqueue-registry only *declares* and audits which `data` fields are personal data; this
+  module *enforces* it on the wire: a producer encrypts each marked leaf before publish, a
+  consumer decrypts it after decode. It is the Java mirror of the Go reference, so every SDK
+  round-trips byte-for-byte. Standalone and **opt-in**.
+  - `Cipher` is a **caller-provided** interface (`encrypt(byte[])` / `decrypt(String)`) — a
+    seam onto KMS/Vault/HSM/tokenisation, so the core pulls **no** crypto dependency (GR-7).
+    `AesGcmCipher` is a JDK-only reference (`javax.crypto`, AES-256-GCM, a fresh random 12-byte
+    IV prepended, Base64); the caller owns the key. A wrong key or tampered ciphertext fails GCM
+    authentication and throws rather than returning corrupt plaintext.
+  - `Gdpr.protect(data, schema, cipher)` / `Gdpr.unprotect(...)` rewrite each `x-gdpr-sensitive`
+    leaf **in place**: the value is canonically JSON-encoded then replaced by the ciphertext
+    **string**, and `unprotect` decodes the decrypted bytes back — so the round-trip is
+    **byte-for-byte** (a number restores to a number, an object to an object). An absent path is
+    skipped; a non-string leaf in `unprotect` is left untouched (idempotent re-runs); a value the
+    cipher cannot open throws `DecryptException` so the message takes retry / dead-letter.
+  - `SensitivePaths.of(schema)` (+ the `SensitivePath` record) in `com.babelqueue.schema` walk a
+    decoded JSON Schema for the `x-gdpr-sensitive` marks (boolean `true` or a non-empty string
+    category), descending nested objects, array items (`field[]`) and the root. The keyword is
+    **validation-neutral** — annotating a schema is never a breaking change.
+  - The wire envelope stays **frozen**: only the *value* of a sensitive field changes (to a
+    ciphertext string), so `data` is still pure JSON (GR-3), `meta.schema_version` stays `1` and
+    `trace_id` is untouched (GR-4). This is additive and opt-in.
+
 ## [1.6.0] - 2026-06-21
 
 ### Added
