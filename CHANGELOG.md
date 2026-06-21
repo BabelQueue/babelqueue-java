@@ -9,6 +9,32 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-06-21
+
+### Added
+- **Transactional-outbox helper** (ADR-0029) in the new optional `com.babelqueue.outbox`
+  module — the **producer-side** mirror of the consumer-side idempotency helper
+  (ADR-0022). It removes the producer *dual write*: the message is persisted into the
+  caller's own database, **inside the caller's own transaction**, so it commits or rolls
+  back atomically with the business data, and a separate relay publishes the durable rows
+  afterwards. Exactly-once *handoff* into the broker, then at-least-once on the wire as
+  always (consumers still dedupe on `meta.id`).
+  - `Outbox.write(envelope)` encodes via the frozen `EnvelopeCodec` and hands the **bytes
+    verbatim** to the store — the outbox stores the wire envelope byte-for-byte and never
+    adds an envelope field (GR-1, `schema_version` stays `1`); `trace_id` is preserved
+    end-to-end (GR-4) and the relay publishes those exact bytes (GR-5).
+  - `OutboxStore` is the persistence contract the caller binds to their own DB (JDBC) —
+    the core adds **no** DB driver (GR-7); `InMemoryOutboxStore` is the reference for
+    tests/single-process demos. **The transaction boundary is the caller's**: `Outbox`
+    never begins/commits.
+  - `OutboxRelay.flush()`/`drain(maxPasses)` publish a batch through the publish-only
+    `OutboxTransport` seam, marking a row published **only after** the transport accepts
+    it; a throwing publish is caught, recorded via `markFailed` with a bounded linear
+    backoff (injectable `Sleeper` so tests stay instant), and the row stays pending — one
+    poison row never blocks the batch.
+  - The envelope wire format is unchanged; this is an additive, opt-in producer-side
+    concern.
+
 ## [1.5.0] - 2026-06-21
 
 ### Added

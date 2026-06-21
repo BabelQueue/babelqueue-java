@@ -101,6 +101,51 @@ Envelope dlq = DeadLetters.annotate(env, "failed", "orders", 3, "boom", "java.la
 unchanged inside the dead-lettered message, so any-language consumers can still
 read it.
 
+### Transactional outbox (optional)
+
+The `com.babelqueue.outbox` helper (ADR-0029) removes the producer **dual write** —
+"commit the business row" *and* "publish to the broker" are two systems that can
+disagree on a crash. Instead the message is written into **your own database, inside
+your own transaction**, so it commits or rolls back atomically with the business data;
+a separate relay publishes the durable rows afterwards.
+
+```java
+import com.babelqueue.outbox.*;
+
+// Bind the OutboxStore to YOUR database (a JDBC adapter writes the row on `connection`).
+// The core ships only an in-memory reference — it pulls in no DB driver (GR-7).
+OutboxStore store = /* your JDBC-backed store */;
+Outbox outbox = new Outbox(store);
+
+// 1) Write side — the CALLER owns the transaction boundary (this is the whole point):
+connection.setAutoCommit(false);
+try {
+    insertOrder(connection, order);                                   // the business write
+    Envelope env = EnvelopeCodec.make("urn:babel:orders:created", data, "orders", null);
+    outbox.write(env);                                                // same connection, same tx
+    connection.commit();                                              // both, or neither
+} catch (Exception e) {
+    connection.rollback();
+    throw e;
+}
+
+// 2) Relay side — run on a short interval AFTER the tx commits. Publish the stored bytes
+//    verbatim through your broker; mark published only after the transport accepts them.
+OutboxTransport transport = (queue, body) -> jedis.rpush("queues:" + queue, new String(body, UTF_8));
+OutboxRelay relay = new OutboxRelay(transport, store);
+OutboxRelayResult result = relay.drain(0);   // loop until the outbox is empty
+```
+
+`Outbox.write` stores the `EnvelopeCodec`-encoded **bytes verbatim** (GR-1, the envelope
+never changes) and the relay publishes those exact bytes — so `trace_id` is preserved
+end-to-end (GR-4) and the body is byte-identical before store and after relay (GR-5). A
+publish that throws is recorded (`markFailed`) with a bounded backoff and left pending for
+the next pass; one poison row never blocks the batch. This is exactly-once **handoff** into
+the broker, then at-least-once on the wire as always — consumers still dedupe on `meta.id`
+(the consumer-side `com.babelqueue.idempotency` helper is the mirror). Relay concurrency
+(`SELECT … FOR UPDATE SKIP LOCKED`) is the adapter's job; the in-memory reference store does
+not implement it.
+
 ## What this core is (and isn't)
 
 It enforces the **contract**: the envelope shape, URN identity, trace propagation,
