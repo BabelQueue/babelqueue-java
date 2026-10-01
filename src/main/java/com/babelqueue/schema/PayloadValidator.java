@@ -104,7 +104,9 @@ public final class PayloadValidator {
         if (!(value instanceof String str)) {
             return violation(path, "not_a_string");
         }
-        if (schema.get("minLength") instanceof Number min && str.length() < min.intValue()) {
+        // JSON Schema counts string length in Unicode code points, not UTF-16 units.
+        if (schema.get("minLength") instanceof Number min
+            && str.codePointCount(0, str.length()) < min.intValue()) {
             return violation(path, "below_min_length");
         }
         return null;

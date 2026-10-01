@@ -2,7 +2,10 @@ package com.babelqueue;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * Builds, encodes and decodes the canonical BabelQueue envelope — the single Java
@@ -20,6 +23,23 @@ public final class EnvelopeCodec {
 
     /** The value stamped into {@code meta.lang} for envelopes produced here. */
     public static final String SOURCE_LANG = "java";
+
+    /** Top-level keys the codec maps to {@link Envelope} components ({@code urn} is the inbound alias of {@code job}). */
+    private static final Set<String> KNOWN_TOP_LEVEL =
+        Set.of("job", "urn", "trace_id", "data", "meta", "attempts", "dead_letter");
+
+    /** {@code meta} keys the codec maps to {@link Meta} components. */
+    private static final Set<String> KNOWN_META =
+        Set.of("id", "queue", "lang", "schema_version", "created_at");
+
+    /** Forbidden top-level keys (message-envelope.md §10) — never captured, never encoded. */
+    private static final Set<String> FORBIDDEN_TOP_LEVEL = Set.of("timestamp");
+
+    /** Forbidden {@code meta} keys (message-envelope.md §10) — never captured, never encoded. */
+    private static final Set<String> FORBIDDEN_META =
+        Set.of("max_retries", "attempts", "source", "ts");
+
+    private static final System.Logger LOGGER = System.getLogger(EnvelopeCodec.class.getName());
 
     private EnvelopeCodec() {}
 
@@ -79,7 +99,10 @@ public final class EnvelopeCodec {
 
     /**
      * Encode the envelope as compact UTF-8 JSON. Slashes and non-ASCII are left
-     * unescaped, matching the other SDK cores; the field order is canonical.
+     * unescaped, matching the other SDK cores; the field order is canonical. Known
+     * fields are written first in their canonical order, followed by the unknown keys
+     * kept in {@link Envelope#extras()} / {@link Meta#extras()} in their original order.
+     * Forbidden keys (§10) are never written, even if a caller put them into extras.
      */
     public static String encode(Envelope envelope) {
         Map<String, Object> root = new LinkedHashMap<>();
@@ -95,6 +118,7 @@ public final class EnvelopeCodec {
             metaMap.put("lang", meta.lang());
             metaMap.put("schema_version", meta.schemaVersion());
             metaMap.put("created_at", meta.createdAt());
+            appendExtras(metaMap, meta.extras(), KNOWN_META, FORBIDDEN_META);
         }
         root.put("meta", metaMap);
         root.put("attempts", envelope.attempts());
@@ -112,7 +136,22 @@ public final class EnvelopeCodec {
             root.put("dead_letter", dlMap);
         }
 
+        appendExtras(root, envelope.extras(), KNOWN_TOP_LEVEL, FORBIDDEN_TOP_LEVEL);
         return Json.write(root);
+    }
+
+    private static void appendExtras(
+        Map<String, Object> target, Map<String, Object> extras, Set<String> known, Set<String> forbidden) {
+        if (extras == null) {
+            return;
+        }
+        for (Map.Entry<String, Object> entry : extras.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || known.contains(key) || forbidden.contains(key) || target.containsKey(key)) {
+                continue;
+            }
+            target.put(key, entry.getValue());
+        }
     }
 
     /**
@@ -120,8 +159,23 @@ public final class EnvelopeCodec {
      * yields an empty envelope (so {@link #accepts} returns {@code false}); the
      * {@code urn} inbound alias is resolved into {@code job}. Does not validate the
      * contents — call {@link #accepts} first.
+     *
+     * <p>Unknown top-level and {@code meta} keys are preserved in the envelope's
+     * extras. Forbidden keys (message-envelope.md §10) are dropped and a warning is
+     * logged via {@link System.Logger} at {@code WARNING} level; use
+     * {@link #decode(String, Consumer)} to receive the warnings directly.
      */
     public static Envelope decode(String raw) {
+        return decode(raw, warning -> LOGGER.log(System.Logger.Level.WARNING, warning));
+    }
+
+    /**
+     * Same as {@link #decode(String)}, but each warning — one per forbidden key found
+     * and dropped, naming its JSON pointer (e.g. {@code /meta/attempts}) — is passed to
+     * {@code onWarning} instead of the logger. Forbidden keys do not reject the message.
+     */
+    public static Envelope decode(String raw, Consumer<String> onWarning) {
+        Objects.requireNonNull(onWarning, "onWarning");
         Object parsed;
         try {
             parsed = Json.parse(raw);
@@ -140,13 +194,29 @@ public final class EnvelopeCodec {
             }
         }
 
+        Map<String, Object> extras = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            String key = String.valueOf(entry.getKey());
+            if (FORBIDDEN_TOP_LEVEL.contains(key)) {
+                onWarning.accept(forbiddenWarning("/" + key));
+            } else if (!KNOWN_TOP_LEVEL.contains(key)) {
+                extras.put(key, entry.getValue());
+            }
+        }
+
         return new Envelope(
             job,
             asString(map.get("trace_id")),
             asMap(map.get("data")),
-            parseMeta(map.get("meta")),
+            parseMeta(map.get("meta"), onWarning),
             asInt(map.get("attempts"), 0),
-            parseDeadLetter(map.get("dead_letter")));
+            parseDeadLetter(map.get("dead_letter")),
+            extras);
+    }
+
+    private static String forbiddenWarning(String pointer) {
+        return "BabelQueue: dropped forbidden envelope key " + pointer
+            + " (message-envelope.md §10); it will not be re-emitted";
     }
 
     /** The message URN — the canonical {@code job}, with the {@code urn} alias resolved by {@link #decode}. */
@@ -176,17 +246,27 @@ public final class EnvelopeCodec {
         return new Envelope(null, null, null, null, 0, null);
     }
 
-    private static Meta parseMeta(Object value) {
+    private static Meta parseMeta(Object value, Consumer<String> onWarning) {
         Map<String, Object> map = asMap(value);
         if (map == null) {
             return null;
+        }
+        Map<String, Object> extras = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            String key = entry.getKey();
+            if (FORBIDDEN_META.contains(key)) {
+                onWarning.accept(forbiddenWarning("/meta/" + key));
+            } else if (!KNOWN_META.contains(key)) {
+                extras.put(key, entry.getValue());
+            }
         }
         return new Meta(
             asString(map.get("id")),
             asString(map.get("queue")),
             asString(map.get("lang")),
             asInt(map.get("schema_version"), 0),
-            asLong(map.get("created_at"), 0L));
+            asLong(map.get("created_at"), 0L),
+            extras);
     }
 
     private static DeadLetter parseDeadLetter(Object value) {

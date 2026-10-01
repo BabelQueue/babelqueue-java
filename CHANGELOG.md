@@ -9,6 +9,39 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-01
+
+MINOR release: additive public API (`extras`, `withAttempts`, `withDeadLetter`, a new
+`decode` overload). Note that `Envelope` and `Meta` gain a record component, so a Java 21
+record *deconstruction pattern* listing the old component count (`case Envelope(var a, …)`)
+must add the `extras` slot; `new Envelope(...)` / `new Meta(...)` calls with the previous
+argument counts keep compiling.
+
+### Fixed
+- **Unknown keys are preserved (message-envelope.md §4/§8, GR-5).** `Envelope` and `Meta`
+  gain an `extras` component (`Map<String,Object>`, insertion-ordered, unmodifiable, never
+  `null`): `EnvelopeCodec.decode` collects unknown top-level and `meta` keys into it, and
+  `encode` writes the known fields in their canonical order first, then the extras. Every
+  re-emit path carries them: retry (`Envelope.withAttempts`), DLQ (`DeadLetters.annotate`)
+  and redrive (`Redrive.reset`); the outbox relay already publishes the stored bytes verbatim.
+  Previously a decode → re-encode hop silently dropped them.
+- **Forbidden keys (§10, K-15).** `timestamp`, `meta.max_retries`, `meta.attempts`,
+  `meta.source` and `meta.ts` are never captured into extras and never encoded. Decode does
+  not reject them: it drops them and emits a warning naming the JSON pointer (e.g.
+  `/meta/attempts`) — via `System.Logger` at `WARNING`, or to the callback of the new
+  `EnvelopeCodec.decode(String, Consumer<String>)` overload.
+- **`minLength` counts Unicode code points** (ADR-0024), not UTF-16 code units — an emoji is
+  one character, matching every other SDK's payload validator.
+
+### Added
+- Additive API: `Envelope(..., extras)` / `Meta(..., extras)` canonical constructors (the
+  previous 6-arg / 5-arg constructors remain and yield empty extras),
+  `Envelope.withAttempts(int)`, `Envelope.withDeadLetter(DeadLetter)`,
+  `EnvelopeCodec.decode(String, Consumer<String>)`.
+- Conformance runners for the `roundtrip`, `data_shape`, `forbidden_keys` and
+  `payload_schema_unicode` manifest sections (none may be skipped).
+- `.github/dependabot.yml` (Maven + GitHub Actions, weekly).
+
 ## [1.7.0] - 2026-06-21
 
 ### Added

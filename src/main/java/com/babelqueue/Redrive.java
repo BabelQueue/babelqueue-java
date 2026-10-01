@@ -132,10 +132,10 @@ public final class Redrive {
     /**
      * Returns a copy of {@code env} reset for reprocessing: the {@code dead_letter} block is
      * removed and {@code attempts} reset to 0; {@code job}, {@code trace_id}, {@code data} and
-     * {@code meta} are preserved verbatim.
+     * {@code meta} are preserved verbatim, as are unknown top-level keys ({@link Envelope#extras()}).
      */
     public static Envelope reset(Envelope env) {
-        return new Envelope(env.job(), env.traceId(), env.data(), env.meta(), 0, null);
+        return new Envelope(env.job(), env.traceId(), env.data(), env.meta(), 0, null, env.extras());
     }
 
     /**

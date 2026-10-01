@@ -37,12 +37,7 @@ public final class DeadLetters {
             attempts,
             EnvelopeCodec.SOURCE_LANG);
 
-        return new Envelope(
-            envelope.job(),
-            envelope.traceId(),
-            envelope.data(),
-            envelope.meta(),
-            envelope.attempts(),
-            deadLetter);
+        // withDeadLetter keeps every other component, including unknown top-level/meta keys.
+        return envelope.withDeadLetter(deadLetter);
     }
 }
