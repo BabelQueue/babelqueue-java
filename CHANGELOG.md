@@ -9,7 +9,7 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
-## [1.8.0] - 2026-10-01
+## [1.8.0] - 2026-10-03
 
 MINOR release: additive public API (`extras`, `withAttempts`, `withDeadLetter`, a new
 `decode` overload). Note that `Envelope` and `Meta` gain a record component, so a Java 21
