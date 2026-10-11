@@ -26,6 +26,14 @@ import java.util.function.Predicate;
  * {@link KeyedRepublisher} (Kafka: the record key, contract §6.5) is handed the reserved DLQ
  * message for every re-publish — the redrive write and the restore write back to the DLQ — so
  * broker-native per-message metadata is carried over; any other transport gets a plain publish.
+ *
+ * <p>When the restore write itself fails, the reserved message must not be lost: it is never
+ * acknowledged, and a transport that implements {@link Rewinder} (Kafka, where a commit is
+ * cumulative and a later commit could otherwise skip the record) is asked to hand it back to the
+ * broker. If the rewind also fails, both errors are reported together. The same hook runs whenever
+ * the run is stopped by an exception (a redrive write that failed after a successful restore, a
+ * throwing {@code select} predicate, a failed ack): the rest of the already-reserved batch is handed
+ * back too and nothing later can skip it.
  */
 public final class Redrive {
 
@@ -82,6 +90,28 @@ public final class Redrive {
      */
     public interface KeyedRepublisher {
         void publishFrom(String queue, String body, Reserved from) throws Exception;
+    }
+
+    /**
+     * An optional {@link Transport} capability: hand an unacknowledged reserved message back to the
+     * broker so it is redelivered, and make sure nothing acknowledged afterwards can move past it.
+     * {@link #redrive} calls it whenever a message stops the run (its restore write failed and it must
+     * not be lost, its redrive write failed, the {@code select} predicate threw, or the ack failed) —
+     * for an offset-committing broker (Kafka, where a commit is cumulative) it rewinds the consumer to
+     * the message's offset. {@link #redrive} reserves the whole batch before it processes
+     * it, so the implementation must also hand back every other message it reserved and has not
+     * acknowledged yet (Kafka: the consumer position is already past them, and a later commit would
+     * skip them).
+     *
+     * <p>{@code message} may itself already be acknowledged: when a redrive write fails and the
+     * message was restored to the DLQ (and acknowledged), {@link #redrive} stops and calls this to
+     * hand back the rest of the batch. An acknowledged {@code message} must <em>not</em> be
+     * redelivered (that would duplicate it); only the reserved-but-unacknowledged messages are. It
+     * must never delete or acknowledge a message and must not alter its body. A transport that does
+     * not implement it keeps the previous behaviour (the message is left unacknowledged).
+     */
+    public interface Rewinder {
+        void rewind(Reserved message) throws Exception;
     }
 
     /**
@@ -180,60 +210,96 @@ public final class Redrive {
         List<Item> items = new ArrayList<>(batch.size());
 
         for (Reserved msg : batch) {
-            // decode() never throws — a malformed/non-object body yields an empty envelope
-            // (a null job), which is not redrivable; restore it rather than drop it.
-            Envelope env = EnvelopeCodec.decode(msg.body());
-            if (env.job() == null || env.job().isBlank()) {
-                republish(transport, dlq, msg.body(), msg);
-                transport.ack(msg);
-                skipped++;
-                items.add(new Item(null, null, null, null, dlq, null, false, false));
-                continue;
-            }
-
-            String reason = env.deadLetter() == null ? null : env.deadLetter().reason();
-            String messageId = env.meta() == null ? null : env.meta().id();
-
-            if (opts.select() != null && !opts.select().test(env)) {
-                republish(transport, dlq, msg.body(), msg);
-                transport.ack(msg);
-                skipped++;
-                items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, null, false, false));
-                continue;
-            }
-
-            String target = opts.toQueue() != null && !opts.toQueue().isBlank()
-                ? opts.toQueue()
-                : sourceQueueOf(env);
-
-            if (opts.dryRun()) {
-                republish(transport, dlq, msg.body(), msg);
-                transport.ack(msg);
-                skipped++;
-                items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, target, false, false));
-                continue;
-            }
-
-            boolean bypassed = false;
+            Item item;
             try {
-                String encoded = EnvelopeCodec.encode(reset(env));
-                if (opts.bypass() && transport instanceof HeaderPublisher hp) {
-                    hp.publishWithHeaders(target, encoded, Map.of(Replay.HEADER_REPLAY_BYPASS, "1"));
-                    bypassed = true;
-                } else {
-                    republish(transport, target, encoded, msg);
+                item = process(transport, dlq, opts, msg);
+            } catch (Exception failure) {
+                // The run stops here, so the rest of the reserved batch would never be processed. Whatever
+                // stopped it (a failed write, a failed restore, a throwing select predicate, a failed ack),
+                // hand the batch back: msg is unacknowledged unless its redrive/restore was acknowledged
+                // already, in which case it must not be redelivered. A transport that cannot rewind is
+                // left as before.
+                if (transport instanceof Rewinder rw) {
+                    try {
+                        rw.rewind(msg);
+                    } catch (Exception rewindFailure) {
+                        failure.addSuppressed(rewindFailure);
+                    }
                 }
-            } catch (Exception publishFailure) {
-                republish(transport, dlq, msg.body(), msg);
-                transport.ack(msg);
-                throw publishFailure;
+                throw failure;
             }
-            transport.ack(msg);
-            redriven++;
-            items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, target, true, bypassed));
+            if (item.redriven()) {
+                redriven++;
+            } else {
+                skipped++;
+            }
+            items.add(item);
         }
 
         return new Result(redriven, skipped, items);
+    }
+
+    /**
+     * Processes one reserved DLQ message: redrive it, or restore it unchanged (undecodable, not selected,
+     * dry run). A publish failure restores the message to the DLQ and re-throws; a failed restore write
+     * leaves it unacknowledged and throws the restore error with the publish error attached.
+     */
+    private static Item process(Transport transport, String dlq, Options opts, Reserved msg) throws Exception {
+        // decode() never throws — a malformed/non-object body yields an empty envelope
+        // (a null job), which is not redrivable; restore it rather than drop it.
+        Envelope env = EnvelopeCodec.decode(msg.body());
+        if (env.job() == null || env.job().isBlank()) {
+            restore(transport, dlq, msg);
+            return new Item(null, null, null, null, dlq, null, false, false);
+        }
+
+        String reason = env.deadLetter() == null ? null : env.deadLetter().reason();
+        String messageId = env.meta() == null ? null : env.meta().id();
+
+        if (opts.select() != null && !opts.select().test(env)) {
+            restore(transport, dlq, msg);
+            return new Item(messageId, env.traceId(), env.job(), reason, dlq, null, false, false);
+        }
+
+        String target = opts.toQueue() != null && !opts.toQueue().isBlank()
+            ? opts.toQueue()
+            : sourceQueueOf(env);
+
+        if (opts.dryRun()) {
+            restore(transport, dlq, msg);
+            return new Item(messageId, env.traceId(), env.job(), reason, dlq, target, false, false);
+        }
+
+        boolean bypassed = false;
+        try {
+            String encoded = EnvelopeCodec.encode(reset(env));
+            if (opts.bypass() && transport instanceof HeaderPublisher hp) {
+                hp.publishWithHeaders(target, encoded, Map.of(Replay.HEADER_REPLAY_BYPASS, "1"));
+                bypassed = true;
+            } else {
+                republish(transport, target, encoded, msg);
+            }
+        } catch (Exception publishFailure) {
+            try {
+                restore(transport, dlq, msg);
+            } catch (Exception restoreFailure) {
+                restoreFailure.addSuppressed(publishFailure);
+                throw restoreFailure;
+            }
+            throw publishFailure;
+        }
+        transport.ack(msg);
+        return new Item(messageId, env.traceId(), env.job(), reason, dlq, target, true, bypassed);
+    }
+
+    /**
+     * Restore {@code msg} to {@code dlq} unchanged and acknowledge it. If the restore write fails the
+     * message is never acknowledged and the restore error is re-thrown ({@link #redrive} then hands the
+     * batch back to a {@link Rewinder}).
+     */
+    private static void restore(Transport transport, String dlq, Reserved msg) throws Exception {
+        republish(transport, dlq, msg.body(), msg);
+        transport.ack(msg);
     }
 
     /** Re-publish on behalf of {@code from}: through {@link KeyedRepublisher} when available, else plain. */

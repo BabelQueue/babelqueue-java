@@ -9,6 +9,18 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+### Added
+- **`Redrive.Rewinder`: optional transport capability for a run that stops on a failed message.** Whatever
+  stops `Redrive.redrive` (a failed restore write back to the DLQ, a failed redrive write, a throwing
+  `select` predicate, a failed ack), a `Redrive.Transport` that also implements `Rewinder`
+  (`rewind(Reserved)`) is asked to hand back every reserved, unacknowledged message — for Kafka, where a
+  commit is cumulative, so a later commit cannot skip any of them. A message whose restore failed is never
+  acknowledged. `rewind(from)` may be called with an already acknowledged `from` (restored after a failed
+  redrive write); it must not be redelivered. If the rewind fails too, its error is attached to the original
+  error as a suppressed exception (a failed redrive write rides along the same way, the restore error
+  keeping its type). A transport without it behaves exactly as before.
+  Additive public API (MINOR); envelope, `dead_letter` block and headers unchanged.
+
 ## [1.9.0] - 2026-10-11
 
 ### Added
