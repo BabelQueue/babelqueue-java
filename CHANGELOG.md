@@ -9,6 +9,16 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+### Added
+- **`Redrive.KeyedRepublisher`: optional transport capability for key-preserving redrive.**
+  `Redrive.redrive` hands the reserved DLQ message to a `Redrive.Transport` that also implements
+  `KeyedRepublisher` (`publishFrom(queue, body, from)`) for every re-publish it makes — the write to
+  the work topic and the restore write back to the DLQ (dry run, unselected, undecodable body,
+  failed redrive write) — so broker-native per-message metadata such as the Kafka record key is
+  carried over (contract §6.5). A transport without it behaves exactly as before (plain
+  `publish`); with `bypass` set, a `HeaderPublisher` still takes precedence for the redrive write.
+  Additive public API (MINOR); envelope, `dead_letter` block and headers unchanged.
+
 ## [1.8.0] - 2026-10-03
 
 MINOR release: additive public API (`extras`, `withAttempts`, `withDeadLetter`, a new

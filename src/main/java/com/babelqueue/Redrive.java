@@ -22,7 +22,10 @@ import java.util.function.Predicate;
  * <p>Safety is {@code dryRun} + sandbox routing ({@code toQueue}) + {@code select}. The
  * {@code bypass} option stamps a {@code bq-replay-bypass} transport header (see {@link Replay})
  * so a handler can skip external side-effects on a replay; it takes effect on transports that
- * implement {@link HeaderPublisher} (ADR-0027).
+ * implement {@link HeaderPublisher} (ADR-0027). A transport that implements
+ * {@link KeyedRepublisher} (Kafka: the record key, contract §6.5) is handed the reserved DLQ
+ * message for every re-publish — the redrive write and the restore write back to the DLQ — so
+ * broker-native per-message metadata is carried over; any other transport gets a plain publish.
  */
 public final class Redrive {
 
@@ -66,6 +69,19 @@ public final class Redrive {
      */
     public interface HeaderPublisher {
         void publishWithHeaders(String queue, String body, Map<String, String> headers) throws Exception;
+    }
+
+    /**
+     * An optional {@link Transport} capability: re-publish a body on behalf of a message the
+     * transport itself reserved, carrying whatever native per-message metadata the broker
+     * attaches that plain {@link Transport#publish} cannot express — for Kafka, the record key
+     * (contract §6.5). {@link #redrive} uses it for both the write to the work topic and the
+     * restore write back to the DLQ. {@code from} is the reserved DLQ message the re-publish
+     * stands in for, never {@code null}. A transport that does not implement it gets a plain
+     * {@link Transport#publish}, so the metadata is simply not carried.
+     */
+    public interface KeyedRepublisher {
+        void publishFrom(String queue, String body, Reserved from) throws Exception;
     }
 
     /**
@@ -168,7 +184,7 @@ public final class Redrive {
             // (a null job), which is not redrivable; restore it rather than drop it.
             Envelope env = EnvelopeCodec.decode(msg.body());
             if (env.job() == null || env.job().isBlank()) {
-                transport.publish(dlq, msg.body());
+                republish(transport, dlq, msg.body(), msg);
                 transport.ack(msg);
                 skipped++;
                 items.add(new Item(null, null, null, null, dlq, null, false, false));
@@ -179,7 +195,7 @@ public final class Redrive {
             String messageId = env.meta() == null ? null : env.meta().id();
 
             if (opts.select() != null && !opts.select().test(env)) {
-                transport.publish(dlq, msg.body());
+                republish(transport, dlq, msg.body(), msg);
                 transport.ack(msg);
                 skipped++;
                 items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, null, false, false));
@@ -191,7 +207,7 @@ public final class Redrive {
                 : sourceQueueOf(env);
 
             if (opts.dryRun()) {
-                transport.publish(dlq, msg.body());
+                republish(transport, dlq, msg.body(), msg);
                 transport.ack(msg);
                 skipped++;
                 items.add(new Item(messageId, env.traceId(), env.job(), reason, dlq, target, false, false));
@@ -205,10 +221,10 @@ public final class Redrive {
                     hp.publishWithHeaders(target, encoded, Map.of(Replay.HEADER_REPLAY_BYPASS, "1"));
                     bypassed = true;
                 } else {
-                    transport.publish(target, encoded);
+                    republish(transport, target, encoded, msg);
                 }
             } catch (Exception publishFailure) {
-                transport.publish(dlq, msg.body());
+                republish(transport, dlq, msg.body(), msg);
                 transport.ack(msg);
                 throw publishFailure;
             }
@@ -218,6 +234,16 @@ public final class Redrive {
         }
 
         return new Result(redriven, skipped, items);
+    }
+
+    /** Re-publish on behalf of {@code from}: through {@link KeyedRepublisher} when available, else plain. */
+    private static void republish(Transport transport, String queue, String body, Reserved from)
+        throws Exception {
+        if (transport instanceof KeyedRepublisher kr) {
+            kr.publishFrom(queue, body, from);
+        } else {
+            transport.publish(queue, body);
+        }
     }
 
     private static String sourceQueueOf(Envelope env) {
