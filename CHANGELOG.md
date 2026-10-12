@@ -11,10 +11,6 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [1.10.0] - 2026-10-12
 
-### Changed
-
-- Tests only: the vendored conformance suite is now 1.3.0 (exact-case envelope keys, last-wins duplicates: new `invalid-wrong-case-job`, `wrong-case-keys-roundtrip` and `duplicate-keys-last-wins` fixtures). No production change; the Java core already behaved this way.
-
 ### Added
 - **`Redrive.Rewinder`: optional transport capability for a run that stops on a failed message.** Whatever
   stops `Redrive.redrive` (a failed restore write back to the DLQ, a failed redrive write, a throwing
@@ -26,6 +22,10 @@ The envelope wire format is versioned separately by `meta.schema_version`
   error as a suppressed exception (a failed redrive write rides along the same way, the restore error
   keeping its type). A transport without it behaves exactly as before.
   Additive public API (MINOR); envelope, `dead_letter` block and headers unchanged.
+
+### Changed
+
+- Tests only: the vendored conformance suite is now 1.3.0 (exact-case envelope keys, last-wins duplicates: new `invalid-wrong-case-job`, `wrong-case-keys-roundtrip` and `duplicate-keys-last-wins` fixtures). No production change; the Java core already behaved this way.
 
 ## [1.9.0] - 2026-10-11
 
