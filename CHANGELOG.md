@@ -9,6 +9,10 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+### Changed
+
+- Tests only: the vendored conformance suite is now 1.3.0 (exact-case envelope keys, last-wins duplicates: new `invalid-wrong-case-job`, `wrong-case-keys-roundtrip` and `duplicate-keys-last-wins` fixtures). No production change; the Java core already behaved this way.
+
 ### Added
 - **`Redrive.Rewinder`: optional transport capability for a run that stops on a failed message.** Whatever
   stops `Redrive.redrive` (a failed restore write back to the DLQ, a failed redrive write, a throwing
