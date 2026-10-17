@@ -35,6 +35,8 @@ normalisation). The envelope stays frozen at `schema_version: 1`; conformance su
   (`fail` / `delete` / `release`). With `delete` it is removed silently; with `fail` the DLQ copy keeps the
   whitespace `job` and, since decode drops `urn`, loses its routable identity (ADR-0031 Consequences/Negative).
   This is what keeps cross-SDK parity (GR-5).
+  `Redrive` follows the same set: a DLQ message whose `job` is ASCII-blank is restored, while one whose `job` is only
+  Unicode whitespace is redriven like in the other SDKs (previously `Redrive` used `String.isBlank()`).
 - Conformance runners implement the v1.4.0 optional fields (`forbidden_keys.expect_preserved`,
   `roundtrip.expect_absent_after_reencode` / `apply_dead_letter` / `expect_dead_letter`) and the
   `extension_write` / `encode_reject` sections.

@@ -246,9 +246,10 @@ public final class Redrive {
      */
     private static Item process(Transport transport, String dlq, Options opts, Reserved msg) throws Exception {
         // decode() never throws — a malformed/non-object body yields an empty envelope
-        // (a null job), which is not redrivable; restore it rather than drop it.
+        // (a null job), which is not redrivable; restore it rather than drop it. "Blank" is the closed
+        // ASCII set of ADR-0031 (c), not Unicode whitespace, so every SDK redrives the same messages.
         Envelope env = EnvelopeCodec.decode(msg.body());
-        if (env.job() == null || env.job().isBlank()) {
+        if (EnvelopeCodec.isBlankAscii(env.job())) {
             restore(transport, dlq, msg);
             return new Item(null, null, null, null, dlq, null, false, false);
         }

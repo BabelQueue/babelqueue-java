@@ -183,4 +183,33 @@ class RedriveTest {
         assertEquals(1, res.redriven());
         assertEquals(1, t.size("orders"));
     }
+
+    /** ADR-0031 (c): "blank" is the closed ASCII set, so an ASCII-blank job is not redrivable ... */
+    @Test
+    void asciiBlankJobIsRestoredNotRedriven() throws Exception {
+        MemoryTransport t = new MemoryTransport();
+        String body = "{\"job\":\" \\t\\n\",\"data\":{},\"meta\":{\"queue\":\"orders\"},\"attempts\":1}";
+        t.publish("dlq", body);
+
+        Redrive.Result res = Redrive.redrive(t, "dlq", Redrive.Options.all());
+
+        assertEquals(0, res.redriven());
+        assertEquals(1, res.skipped());
+        assertEquals(1, t.size("dlq"), "blank-job message must stay in the DLQ");
+        assertEquals(0, t.size("orders"));
+    }
+
+    /** ... while a job made only of Unicode whitespace (U+2003) is not blank and is redriven like any other SDK does. */
+    @Test
+    void unicodeWhitespaceJobIsRedrivenNotTreatedAsBlank() throws Exception {
+        MemoryTransport t = new MemoryTransport();
+        String body = "{\"job\":\"\\u2003\",\"data\":{},\"meta\":{\"queue\":\"orders\"},\"attempts\":1}";
+        t.publish("dlq", body);
+
+        Redrive.Result res = Redrive.redrive(t, "dlq", Redrive.Options.all());
+
+        assertEquals(1, res.redriven());
+        assertEquals(0, t.size("dlq"));
+        assertEquals(1, t.size("orders"));
+    }
 }

@@ -47,6 +47,10 @@ class BehaviourConformanceTest {
     @TestFactory
     Stream<DynamicTest> roundtrip() {
         return cases("roundtrip").stream().map(c -> dynamicTest(name(c), () -> {
+            // conformance/README.md (v1.4.0): "expect_attempts" and "expect_preserved" are required on every
+            // roundtrip case (the other fields are optional). A case that loses one must fail, not silently verify less.
+            assertNotNull(c.get("expect_attempts"), "roundtrip case lacks mandatory expect_attempts: " + name(c));
+            assertNotNull(c.get("expect_preserved"), "roundtrip case lacks mandatory expect_preserved: " + name(c));
             List<String> violations = roundtripViolations(c, fixture(c));
             assertTrue(violations.isEmpty(), "roundtrip violations: " + violations);
         }));
