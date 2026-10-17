@@ -9,6 +9,36 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-17
+
+Implements ADR-0031 (unknown-key preservation, producer `meta` write API, encode-reject, `urn` alias
+normalisation). The envelope stays frozen at `schema_version: 1`; conformance suite 1.4.0.
+
+### Added
+- **`EnvelopeCodec.make(urn, data, queue, traceId, Map<String,Object> meta)`** — producer `meta` write API.
+  Each entry is one flat `meta` key written next to the core keys (a vendor block goes under `meta.ext.<vendor>`
+  as the whole `ext` value). The existing `make` overloads are unchanged.
+
+### Changed
+- **`encode` rejects instead of silently skipping.** A forbidden key (`timestamp`, top-level `urn`,
+  `meta.max_retries` / `attempts` / `source` / `ts`) or a key that collides with a core key (top-level
+  `job` / `trace_id` / `data` / `meta` / `attempts` / `dead_letter`; `meta.id` / `queue` / `lang` /
+  `schema_version` / `created_at`) in the preserved extras, or in the `meta` passed to `make`, now throws
+  `BabelQueueException` naming the key's JSON pointer. A decoded message never trips this: decode already
+  drops forbidden keys.
+- **`decode`: `job` and `urn` together keep `job`, drop `urn` and warn** (the warning names `/urn`, same form
+  as the other forbidden-key warnings). `urn` is never retained as an extra.
+- **Behaviour change — blank `job` is the closed ASCII set.** "Blank" (the `urn` fallback in `decode`, and
+  `urn()` / `accepts()`) is now only space, `\t`, `\n`, `\v`, `\f`, `\r` instead of `String.isBlank()` (Unicode).
+  A `job` made only of non-ASCII whitespace (U+2003, U+00A0 and so on) with a valid `urn` is therefore no
+  longer routed by the `urn` handler: it is a non-blank identity, so it falls to the unknown-URN strategy
+  (`fail` / `delete` / `release`). With `delete` it is removed silently; with `fail` the DLQ copy keeps the
+  whitespace `job` and, since decode drops `urn`, loses its routable identity (ADR-0031 Consequences/Negative).
+  This is what keeps cross-SDK parity (GR-5).
+- Conformance runners implement the v1.4.0 optional fields (`forbidden_keys.expect_preserved`,
+  `roundtrip.expect_absent_after_reencode` / `apply_dead_letter` / `expect_dead_letter`) and the
+  `extension_write` / `encode_reject` sections.
+
 ## [1.10.0] - 2026-10-12
 
 ### Added

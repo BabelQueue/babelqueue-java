@@ -3,6 +3,7 @@ package com.babelqueue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.DynamicTest.dynamicTest;
@@ -13,17 +14,20 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DynamicTest;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
 
 /**
  * Runs the behavioural sections of the vendored cross-SDK conformance manifest:
- * {@code roundtrip}, {@code data_shape}, {@code forbidden_keys} and
- * {@code payload_schema_unicode}. Every section is mandatory — a missing or empty
+ * {@code roundtrip}, {@code data_shape}, {@code forbidden_keys},
+ * {@code payload_schema_unicode}, {@code extension_write} and {@code encode_reject}. Every section is mandatory — a missing or empty
  * section fails the build rather than being skipped.
  *
  * <p>Equality is deep and type-strict: the core JSON reader maps integers to
@@ -43,21 +47,94 @@ class BehaviourConformanceTest {
     @TestFactory
     Stream<DynamicTest> roundtrip() {
         return cases("roundtrip").stream().map(c -> dynamicTest(name(c), () -> {
-            Envelope decoded = EnvelopeCodec.decode(fixture(c));
-            assertTrue(EnvelopeCodec.accepts(decoded), "decoded envelope must be accepted");
-
-            Envelope retried = decoded.withAttempts(decoded.attempts() + 1);
-            Object out = Json.parse(EnvelopeCodec.encode(retried));
-
-            assertEquals(c.get("expect_attempts"), resolve(out, "/attempts"), "attempts");
-            Map<String, Object> preserved = (Map<String, Object>) c.get("expect_preserved");
-            assertNotNull(preserved, "expect_preserved");
-            for (Map.Entry<String, Object> e : preserved.entrySet()) {
-                Object actual = resolve(out, e.getKey());
-                assertTrue(actual != ABSENT, "pointer " + e.getKey() + " missing after re-encode");
-                assertEquals(e.getValue(), actual, "pointer " + e.getKey());
-            }
+            List<String> violations = roundtripViolations(c, fixture(c));
+            assertTrue(violations.isEmpty(), "roundtrip violations: " + violations);
         }));
+    }
+
+    /**
+     * Evaluates one {@code roundtrip} case against {@code raw} and returns every violation
+     * (empty = conformant). Covers {@code expect_attempts}, {@code expect_preserved},
+     * {@code expect_absent_after_reencode}, {@code apply_dead_letter} (the SDK's own
+     * {@link DeadLetters} helper, applied after the attempts+1 step, all checks then run on the
+     * dead-letter copy) and {@code expect_dead_letter}, plus the "no decode warnings" and
+     * {@code accepts()} rules.
+     */
+    static List<String> roundtripViolations(Map<String, Object> c, String raw) {
+        List<String> violations = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        Envelope decoded = EnvelopeCodec.decode(raw, warnings::add);
+        if (!warnings.isEmpty()) {
+            violations.add("decode produced warnings: " + warnings);
+        }
+        if (!EnvelopeCodec.accepts(decoded)) {
+            violations.add("decoded envelope must be accepted");
+        }
+
+        Envelope reemitted = decoded.withAttempts(decoded.attempts() + 1);
+        Map<String, Object> dl = (Map<String, Object>) c.get("apply_dead_letter");
+        if (dl != null) {
+            reemitted = DeadLetters.annotate(
+                reemitted,
+                (String) dl.get("reason"),
+                (String) dl.get("original_queue"),
+                reemitted.attempts(),
+                "conformance runner",
+                "ConformanceRunnerException");
+        }
+        Object out = Json.parse(EnvelopeCodec.encode(reemitted));
+
+        if (c.containsKey("expect_attempts") && !Objects.equals(c.get("expect_attempts"), resolve(out, "/attempts"))) {
+            violations.add("attempts: expected " + c.get("expect_attempts") + " got " + describe(resolve(out, "/attempts")));
+        }
+        violations.addAll(preservedViolations(out, (Map<String, Object>) c.get("expect_preserved")));
+        violations.addAll(absentViolations(out, (List<Object>) c.get("expect_absent_after_reencode")));
+
+        Map<String, Object> expectDl = (Map<String, Object>) c.get("expect_dead_letter");
+        if (expectDl != null) {
+            for (Map.Entry<String, Object> e : expectDl.entrySet()) {
+                Object actual = resolve(out, "/dead_letter/" + e.getKey());
+                if (actual == ABSENT || !Objects.equals(e.getValue(), actual)) {
+                    violations.add("dead_letter." + e.getKey() + ": expected " + e.getValue() + " got " + describe(actual));
+                }
+            }
+        }
+        return violations;
+    }
+
+    /** Violations of {@code expect_preserved}: each pointer must resolve and equal the given value. */
+    private static List<String> preservedViolations(Object out, Map<String, Object> preserved) {
+        List<String> violations = new ArrayList<>();
+        if (preserved == null) {
+            return violations;
+        }
+        for (Map.Entry<String, Object> e : preserved.entrySet()) {
+            Object actual = resolve(out, e.getKey());
+            if (actual == ABSENT) {
+                violations.add("pointer " + e.getKey() + " missing after re-encode");
+            } else if (!Objects.equals(e.getValue(), actual)) {
+                violations.add("pointer " + e.getKey() + ": expected " + e.getValue() + " got " + describe(actual));
+            }
+        }
+        return violations;
+    }
+
+    /** Violations of {@code expect_absent_after_reencode}: no listed pointer may resolve. */
+    private static List<String> absentViolations(Object out, List<Object> pointers) {
+        List<String> violations = new ArrayList<>();
+        if (pointers == null) {
+            return violations;
+        }
+        for (Object pointer : pointers) {
+            if (resolve(out, (String) pointer) != ABSENT) {
+                violations.add(pointer + " must not be re-emitted");
+            }
+        }
+        return violations;
+    }
+
+    private static String describe(Object value) {
+        return value == ABSENT ? "<absent>" : String.valueOf(value);
     }
 
     @TestFactory
@@ -89,22 +166,36 @@ class BehaviourConformanceTest {
     @TestFactory
     Stream<DynamicTest> forbiddenKeys() {
         return cases("forbidden_keys").stream().map(c -> dynamicTest(name(c), () -> {
-            assertEquals("warn", c.get("expect"));
-            String forbiddenKey = (String) c.get("forbidden_key");
-
-            List<String> warnings = new ArrayList<>();
-            Envelope decoded = EnvelopeCodec.decode(fixture(c), warnings::add);
-
-            assertTrue(EnvelopeCodec.accepts(decoded), "forbidden key must not reject the message");
-            assertTrue(
-                warnings.stream().anyMatch(w -> w.contains(forbiddenKey)),
-                "expected a warning naming " + forbiddenKey + ", got " + warnings);
-
-            Object out = Json.parse(EnvelopeCodec.encode(decoded));
-            for (Object pointer : (List<Object>) c.get("expect_absent_after_reencode")) {
-                assertTrue(resolve(out, (String) pointer) == ABSENT, pointer + " must not be re-emitted");
-            }
+            List<String> violations = forbiddenKeyViolations(c, fixture(c));
+            assertTrue(violations.isEmpty(), "forbidden_keys violations: " + violations);
         }));
+    }
+
+    /**
+     * Evaluates one {@code forbidden_keys} case against {@code raw}: the message is still accepted,
+     * decode warns naming {@code forbidden_key}, and the re-emit satisfies
+     * {@code expect_absent_after_reencode} and {@code expect_preserved}.
+     */
+    static List<String> forbiddenKeyViolations(Map<String, Object> c, String raw) {
+        List<String> violations = new ArrayList<>();
+        if (!"warn".equals(c.get("expect"))) {
+            violations.add("unsupported expect: " + c.get("expect"));
+        }
+        String forbiddenKey = (String) c.get("forbidden_key");
+
+        List<String> warnings = new ArrayList<>();
+        Envelope decoded = EnvelopeCodec.decode(raw, warnings::add);
+        if (!EnvelopeCodec.accepts(decoded)) {
+            violations.add("forbidden key must not reject the message");
+        }
+        if (warnings.stream().noneMatch(w -> w.contains(forbiddenKey))) {
+            violations.add("expected a warning naming " + forbiddenKey + ", got " + warnings);
+        }
+
+        Object out = Json.parse(EnvelopeCodec.encode(decoded));
+        violations.addAll(absentViolations(out, (List<Object>) c.get("expect_absent_after_reencode")));
+        violations.addAll(preservedViolations(out, (Map<String, Object>) c.get("expect_preserved")));
+        return violations;
     }
 
     @TestFactory
@@ -116,6 +207,147 @@ class BehaviourConformanceTest {
             boolean isValid = PayloadValidator.validate(schema, c.get("data")) == null;
             assertEquals(c.get("valid"), isValid, "validator verdict");
         }));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> extensionWrite() {
+        return cases("extension_write").stream().map(c -> dynamicTest(name(c), () -> {
+            Envelope made = EnvelopeCodec.make(
+                (String) c.get("urn"),
+                (Map<String, Object>) c.get("data"),
+                (String) c.get("queue"),
+                null,
+                (Map<String, Object>) c.get("meta"));
+            String encoded = EnvelopeCodec.encode(made);
+            Map<String, Object> expected = (Map<String, Object>) c.get("expect_envelope");
+
+            List<String> violations = new ArrayList<>(preservedViolations(Json.parse(encoded), expected));
+            assertTrue(violations.isEmpty(), "first emit: " + violations);
+
+            // Re-emit chain: decode, attempts + 1, encode; the extension keys must survive the hop.
+            Envelope hop = EnvelopeCodec.decode(encoded).withAttempts(1);
+            Object reemitted = Json.parse(EnvelopeCodec.encode(hop));
+            violations.addAll(preservedViolations(reemitted, expected));
+            if (!Objects.equals(1L, resolve(reemitted, "/attempts"))) {
+                violations.add("/attempts must be 1 after the hop, got " + describe(resolve(reemitted, "/attempts")));
+            }
+            assertTrue(violations.isEmpty(), "re-emit chain: " + violations);
+        }));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> encodeReject() {
+        return cases("encode_reject").stream().map(c -> dynamicTest(name(c), () -> {
+            // A JSON object cannot express a repeated key and make() takes one map per call.
+            Assumptions.assumeTrue(!c.containsKey("meta_entries"), "repeated meta keys are inexpressible in Java");
+            assertEquals("reject", c.get("expect"));
+
+            BabelQueueException ex = assertThrows(BabelQueueException.class, () -> {
+                Envelope env = EnvelopeCodec.make(
+                    (String) c.get("urn"),
+                    (Map<String, Object>) c.get("data"),
+                    (String) c.get("queue"),
+                    null,
+                    (Map<String, Object>) c.get("meta"));
+                Map<String, Object> extrasTop = (Map<String, Object>) c.get("extras_top");
+                Map<String, Object> extrasMeta = (Map<String, Object>) c.get("extras_meta");
+                if (extrasTop != null || extrasMeta != null) {
+                    Meta m = env.meta();
+                    Map<String, Object> metaExtras = new LinkedHashMap<>(m.extras());
+                    if (extrasMeta != null) {
+                        metaExtras.putAll(extrasMeta);
+                    }
+                    env = new Envelope(
+                        env.job(),
+                        env.traceId(),
+                        env.data(),
+                        new Meta(m.id(), m.queue(), m.lang(), m.schemaVersion(), m.createdAt(), metaExtras),
+                        env.attempts(),
+                        env.deadLetter(),
+                        extrasTop == null ? Map.of() : extrasTop);
+                }
+                EnvelopeCodec.encode(env);
+            });
+            String offending = (String) c.get("offending_key");
+            assertTrue(offending == null || ex.getMessage().contains(offending),
+                "message should name " + offending + ": " + ex.getMessage());
+        }));
+    }
+
+    // --- the runner must really detect violations (a runner that ignores a field passes everything) ---
+
+    private static final String SYNTH_RAW = "{\"job\":\"urn:acme:a\",\"trace_id\":\"t-1\",\"data\":{\"k\":1},"
+        + "\"meta\":{\"id\":\"m-1\",\"queue\":\"orders\",\"lang\":\"php\",\"schema_version\":1,"
+        + "\"created_at\":1,\"vendor_flag\":true},\"attempts\":0,\"extra_top\":1}";
+
+    private static Map<String, Object> synthetic(Object... kv) {
+        Map<String, Object> c = new LinkedHashMap<>();
+        for (int i = 0; i < kv.length; i += 2) {
+            c.put((String) kv[i], kv[i + 1]);
+        }
+        return c;
+    }
+
+    @Test
+    void runnerReportsConformantSyntheticCaseAsClean() {
+        Map<String, Object> c = synthetic(
+            "expect_attempts", 1L,
+            "expect_preserved", Map.of("/job", "urn:acme:a", "/extra_top", 1L, "/meta/vendor_flag", true),
+            "expect_absent_after_reencode", List.of("/urn", "/timestamp"),
+            "apply_dead_letter", Map.of("reason", "failed", "original_queue", "orders"),
+            "expect_dead_letter", Map.of("reason", "failed", "original_queue", "orders"));
+        assertEquals(List.of(), roundtripViolations(c, SYNTH_RAW));
+    }
+
+    @Test
+    void runnerReportsPresentPointerAsExpectAbsentViolation() {
+        Map<String, Object> c = synthetic("expect_attempts", 1L, "expect_absent_after_reencode", List.of("/job", "/meta/vendor_flag"));
+        List<String> v = roundtripViolations(c, SYNTH_RAW);
+        assertEquals(2, v.size(), v.toString());
+        assertTrue(v.get(0).contains("/job"), v.toString());
+        assertTrue(v.get(1).contains("/meta/vendor_flag"), v.toString());
+    }
+
+    @Test
+    void runnerReportsMissingOrDifferentValueAsExpectPreservedViolation() {
+        Map<String, Object> c = synthetic(
+            "expect_attempts", 1L,
+            "expect_preserved", Map.of("/job", "urn:acme:other", "/nope", 1L, "/extra_top", 1L));
+        List<String> v = roundtripViolations(c, SYNTH_RAW);
+        assertEquals(2, v.size(), v.toString());
+        assertTrue(v.stream().anyMatch(m -> m.contains("/job") && m.contains("urn:acme:other")), v.toString());
+        assertTrue(v.stream().anyMatch(m -> m.contains("/nope") && m.contains("missing")), v.toString());
+    }
+
+    @Test
+    void runnerReportsWrongDeadLetterFieldsAndAttempts() {
+        Map<String, Object> c = synthetic(
+            "expect_attempts", 9L,
+            "apply_dead_letter", Map.of("reason", "failed", "original_queue", "orders"),
+            "expect_dead_letter", Map.of("reason", "expired", "original_queue", "orders", "missing_field", "x"));
+        List<String> v = roundtripViolations(c, SYNTH_RAW);
+        assertEquals(3, v.size(), v.toString());
+        assertTrue(v.stream().anyMatch(m -> m.startsWith("attempts")), v.toString());
+        assertTrue(v.stream().anyMatch(m -> m.contains("dead_letter.reason")), v.toString());
+        assertTrue(v.stream().anyMatch(m -> m.contains("dead_letter.missing_field")), v.toString());
+    }
+
+    @Test
+    void runnerReportsForbiddenKeyViolationsOnSyntheticCase() {
+        String raw = SYNTH_RAW.replace("\"attempts\":0", "\"attempts\":0,\"timestamp\":5");
+        Map<String, Object> ok = synthetic(
+            "expect", "warn", "forbidden_key", "/timestamp",
+            "expect_absent_after_reencode", List.of("/timestamp"),
+            "expect_preserved", Map.of("/job", "urn:acme:a"));
+        assertEquals(List.of(), forbiddenKeyViolations(ok, raw));
+
+        // /job is re-emitted, /job has another value, and no warning names /meta/ts.
+        Map<String, Object> bad = synthetic(
+            "expect", "warn", "forbidden_key", "/meta/ts",
+            "expect_absent_after_reencode", List.of("/job"),
+            "expect_preserved", Map.of("/job", "urn:acme:other"));
+        List<String> v = forbiddenKeyViolations(bad, raw);
+        assertEquals(3, v.size(), v.toString());
     }
 
     // --- helpers -------------------------------------------------------------------

@@ -45,31 +45,59 @@ class EnvelopeExtrasTest {
     }
 
     @Test
-    void encodeNeverEmitsForbiddenOrShadowingKeysFromExtras() {
-        Map<String, Object> top = new LinkedHashMap<>();
-        top.put("timestamp", 1);
-        top.put("job", "urn:evil");
-        top.put("urn", "urn:evil");
-        top.put("ok", 1);
-        Map<String, Object> metaExtras = new LinkedHashMap<>();
-        metaExtras.put("max_retries", 3);
-        metaExtras.put("attempts", 3);
-        metaExtras.put("source", "x");
-        metaExtras.put("ts", 1);
-        metaExtras.put("queue", "other");
-        Meta meta = new Meta("m", "q", "java", 1, 1L, metaExtras);
-        Envelope env = new Envelope("urn:babel:a:b", "t", Map.of(), meta, 0, null, top);
+    void encodeRejectsForbiddenOrShadowingExtrasInsteadOfSkippingThem() {
+        // ADR-0031 (c): the silent skip is gone; every offending key throws, naming its pointer.
+        for (String key : List.of("timestamp", "urn", "job", "trace_id", "data", "meta", "attempts", "dead_letter")) {
+            Envelope env = envelopeWithTop(Map.of(key, "x"));
+            BabelQueueException ex = assertThrows(BabelQueueException.class, () -> EnvelopeCodec.encode(env), key);
+            assertTrue(ex.getMessage().contains("/" + key), ex.getMessage());
+        }
+        for (String key : List.of("max_retries", "attempts", "source", "ts", "id", "queue", "lang",
+            "schema_version", "created_at")) {
+            Meta meta = new Meta("m", "q", "java", 1, 1L, Map.of(key, 3));
+            Envelope env = new Envelope("urn:babel:a:b", "t", Map.of(), meta, 0, null);
+            BabelQueueException ex = assertThrows(BabelQueueException.class, () -> EnvelopeCodec.encode(env), key);
+            assertTrue(ex.getMessage().contains("/meta/" + key), ex.getMessage());
+        }
+    }
+
+    @Test
+    void decodedMessageWithForbiddenKeysStillReEncodes() {
+        // Decode drops forbidden keys (with a warning), so the re-emit never trips the encode reject.
+        Map<String, Object> out = (Map<String, Object>) Json.parse(
+            EnvelopeCodec.encode(EnvelopeCodec.decode(RAW, w -> { })));
+        assertFalse(out.containsKey("timestamp"));
+        assertFalse(((Map<String, Object>) out.get("meta")).containsKey("ts"));
+    }
+
+    @Test
+    void makeWithMetaWritesEntriesNextToCoreKeys() {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("vendor_flag", true);
+        meta.put("ext", Map.of("acme", Map.of("tier", "gold")));
+        Envelope env = EnvelopeCodec.make("urn:babel:a:b", Map.of("id", 1), "orders", null, meta);
 
         Map<String, Object> out = (Map<String, Object>) Json.parse(EnvelopeCodec.encode(env));
-        assertEquals("urn:babel:a:b", out.get("job"));
-        assertFalse(out.containsKey("timestamp"));
-        assertFalse(out.containsKey("urn"));
-        assertEquals(1L, out.get("ok"));
         Map<String, Object> outMeta = (Map<String, Object>) out.get("meta");
-        assertEquals("q", outMeta.get("queue"));
-        for (String key : List.of("max_retries", "attempts", "source", "ts")) {
-            assertFalse(outMeta.containsKey(key), key);
+        assertEquals(true, outMeta.get("vendor_flag"));
+        assertEquals("orders", outMeta.get("queue"));
+        assertEquals(Map.of("acme", Map.of("tier", "gold")), outMeta.get("ext"));
+
+        Envelope plain = EnvelopeCodec.make("urn:babel:a:b", Map.of(), "orders", null, null);
+        assertTrue(plain.meta().extras().isEmpty());
+    }
+
+    @Test
+    void makeWithMetaRejectsCoreAndForbiddenKeys() {
+        for (String key : List.of("id", "queue", "lang", "schema_version", "created_at",
+            "max_retries", "attempts", "source", "ts")) {
+            assertThrows(BabelQueueException.class,
+                () -> EnvelopeCodec.make("urn:babel:a:b", Map.of(), "q", null, Map.of(key, 1)), key);
         }
+    }
+
+    private static Envelope envelopeWithTop(Map<String, Object> top) {
+        return new Envelope("urn:babel:a:b", "t", Map.of(), new Meta("m", "q", "java", 1, 1L), 0, null, top);
     }
 
     @Test
@@ -106,5 +134,33 @@ class EnvelopeExtrasTest {
             + "\"attempts\":0}", w -> { });
         assertEquals("urn:babel:a:b", env.job());
         assertTrue(env.extras().isEmpty());
+    }
+
+    @Test
+    void jobAndUrnTogetherKeepJobDropUrnAndWarn() {
+        List<String> warnings = new ArrayList<>();
+        Envelope env = EnvelopeCodec.decode("{\"job\":\"urn:babel:a:b\",\"urn\":\"urn:babel:x:y\","
+            + "\"trace_id\":\"t\",\"data\":{},\"meta\":{\"id\":\"m\",\"queue\":\"q\",\"lang\":\"go\","
+            + "\"schema_version\":1,\"created_at\":1},\"attempts\":0}", warnings::add);
+        assertEquals("urn:babel:a:b", env.job());
+        assertTrue(env.extras().isEmpty());
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("/urn")), warnings.toString());
+    }
+
+    @Test
+    void blankJobUsesClosedAsciiSetOnly() {
+        String tail = ",\"urn\":\"urn:babel:b:c\",\"trace_id\":\"t\",\"data\":{},\"meta\":{\"id\":\"m\","
+            + "\"queue\":\"q\",\"lang\":\"go\",\"schema_version\":1,\"created_at\":1},\"attempts\":0}";
+        // ASCII blank (space, tab, newline, VT, FF, CR) falls back to urn, silently.
+        List<String> warnings = new ArrayList<>();
+        Envelope ascii = EnvelopeCodec.decode("{\"job\":\" \\t\\n\\u000b\\f\\r\"" + tail, warnings::add);
+        assertEquals("urn:babel:b:c", ascii.job());
+        assertTrue(warnings.isEmpty(), warnings.toString());
+        // U+2003 is not blank: job wins, urn dropped with a warning, no fallback.
+        warnings.clear();
+        Envelope unicode = EnvelopeCodec.decode("{\"job\":\"\\u2003\"" + tail, warnings::add);
+        assertEquals("\u2003", unicode.job());
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("/urn")), warnings.toString());
+        assertTrue(EnvelopeCodec.accepts(unicode), "a U+2003 job is a non-blank identity");
     }
 }

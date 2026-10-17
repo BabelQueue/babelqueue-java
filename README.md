@@ -101,6 +101,21 @@ Envelope dlq = DeadLetters.annotate(env, "failed", "orders", 3, "boom", "java.la
 unchanged inside the dead-lettered message, so any-language consumers can still
 read it.
 
+### Extension keys and `meta` (ADR-0031)
+
+Unknown top-level and `meta` keys on an inbound message are preserved on every re-emit (retry, DLQ,
+redrive). Producers can add their own `meta` entries; a vendor block belongs under `meta.ext.<vendor>`:
+
+```java
+Envelope env = EnvelopeCodec.make("urn:babel:orders:created", Map.of("order_id", 1042),
+    "orders", null, Map.of("ext", Map.of("acme", Map.of("tier", "gold"))));
+```
+
+`encode` throws `BabelQueueException` — it never silently drops — for a forbidden key (`timestamp`,
+`urn`, `meta.max_retries` / `attempts` / `source` / `ts`) or a key that collides with a core key.
+On decode, `job` wins over `urn` (the alias is dropped with a warning), and "blank" `job` means only
+ASCII whitespace (space, `\t`, `\n`, `\v`, `\f`, `\r`).
+
 ### Transactional outbox (optional)
 
 The `com.babelqueue.outbox` helper (ADR-0029) removes the producer **dual write** —

@@ -32,8 +32,19 @@ public final class EnvelopeCodec {
     private static final Set<String> KNOWN_META =
         Set.of("id", "queue", "lang", "schema_version", "created_at");
 
-    /** Forbidden top-level keys (message-envelope.md §10) — never captured, never encoded. */
-    private static final Set<String> FORBIDDEN_TOP_LEVEL = Set.of("timestamp");
+    /**
+     * Core top-level keys the codec itself writes — an extras entry with one of these names
+     * would shadow a contract field, so encode rejects it (ADR-0031 (b)).
+     */
+    private static final Set<String> CORE_TOP_LEVEL =
+        Set.of("job", "trace_id", "data", "meta", "attempts", "dead_letter");
+
+    /**
+     * Forbidden top-level keys (message-envelope.md §10) — never captured on decode, rejected on
+     * encode. {@code urn} is the inbound alias of {@code job}: decode resolves it and never
+     * retains it, so on the encode side it can only be a leftover (ADR-0031 (c)).
+     */
+    private static final Set<String> FORBIDDEN_TOP_LEVEL = Set.of("timestamp", "urn");
 
     /** Forbidden {@code meta} keys (message-envelope.md §10) — never captured, never encoded. */
     private static final Set<String> FORBIDDEN_META =
@@ -57,6 +68,26 @@ public final class EnvelopeCodec {
      * @throws BabelQueueException if {@code urn} is {@code null} or blank
      */
     public static Envelope make(String urn, Map<String, Object> data, String queue, String traceId) {
+        return make(urn, data, queue, traceId, null);
+    }
+
+    /**
+     * Same as {@link #make(String, Map, String, String)}, with extra {@code meta} entries
+     * written next to the core keys (ADR-0031 (b)). Each entry is one flat {@code meta} key; a
+     * vendor block is supplied as the whole {@code ext} value (recommended shape:
+     * {@code meta.ext.<vendor>}). The core never overwrites a core key.
+     *
+     * @param meta extra {@code meta} entries, or {@code null} for none
+     * @throws BabelQueueException if {@code urn} is {@code null} or blank, or if {@code meta}
+     *     contains a core {@code meta} key ({@code id}, {@code queue}, {@code lang},
+     *     {@code schema_version}, {@code created_at}), a forbidden key (message-envelope.md §10)
+     *     or a {@code null} key
+     */
+    public static Envelope make(
+        String urn, Map<String, Object> data, String queue, String traceId, Map<String, Object> meta) {
+        Map<String, Object> metaExtras = meta == null ? null : new LinkedHashMap<>(meta);
+        rejectInvalidExtras(metaExtras, KNOWN_META, FORBIDDEN_META, "/meta/");
+
         String resolvedUrn = urn == null ? "" : urn.strip();
         if (resolvedUrn.isEmpty()) {
             throw new BabelQueueException(
@@ -72,14 +103,15 @@ public final class EnvelopeCodec {
         Map<String, Object> payload =
             data == null ? new LinkedHashMap<>() : new LinkedHashMap<>(data);
 
-        Meta meta = new Meta(
+        Meta metaBlock = new Meta(
             UUID.randomUUID().toString(),
             queue == null ? "default" : queue,
             SOURCE_LANG,
             SCHEMA_VERSION,
-            System.currentTimeMillis());
+            System.currentTimeMillis(),
+            metaExtras);
 
-        return new Envelope(resolvedUrn, trace, payload, meta, 0, null);
+        return new Envelope(resolvedUrn, trace, payload, metaBlock, 0, null);
     }
 
     /** Build the envelope from a {@link PolyglotMessage} on the default queue. */
@@ -102,9 +134,16 @@ public final class EnvelopeCodec {
      * unescaped, matching the other SDK cores; the field order is canonical. Known
      * fields are written first in their canonical order, followed by the unknown keys
      * kept in {@link Envelope#extras()} / {@link Meta#extras()} in their original order.
-     * Forbidden keys (§10) are never written, even if a caller put them into extras.
+     *
+     * @throws BabelQueueException if an extras entry is a forbidden key (§10) or collides with a
+     *     core key — never a silent drop (ADR-0031 (c)). Decode removes forbidden keys, so a
+     *     decoded message re-encodes without tripping this.
      */
     public static String encode(Envelope envelope) {
+        rejectInvalidExtras(envelope.extras(), CORE_TOP_LEVEL, FORBIDDEN_TOP_LEVEL, "/");
+        if (envelope.meta() != null) {
+            rejectInvalidExtras(envelope.meta().extras(), KNOWN_META, FORBIDDEN_META, "/meta/");
+        }
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("job", envelope.job());
         root.put("trace_id", envelope.traceId());
@@ -118,7 +157,7 @@ public final class EnvelopeCodec {
             metaMap.put("lang", meta.lang());
             metaMap.put("schema_version", meta.schemaVersion());
             metaMap.put("created_at", meta.createdAt());
-            appendExtras(metaMap, meta.extras(), KNOWN_META, FORBIDDEN_META);
+            appendExtras(metaMap, meta.extras());
         }
         root.put("meta", metaMap);
         root.put("attempts", envelope.attempts());
@@ -136,21 +175,39 @@ public final class EnvelopeCodec {
             root.put("dead_letter", dlMap);
         }
 
-        appendExtras(root, envelope.extras(), KNOWN_TOP_LEVEL, FORBIDDEN_TOP_LEVEL);
+        appendExtras(root, envelope.extras());
         return Json.write(root);
     }
 
-    private static void appendExtras(
-        Map<String, Object> target, Map<String, Object> extras, Set<String> known, Set<String> forbidden) {
+    private static void appendExtras(Map<String, Object> target, Map<String, Object> extras) {
+        if (extras != null) {
+            target.putAll(extras);
+        }
+    }
+
+    /**
+     * Reject an extras map that holds a {@code null} key, a core key or a forbidden key.
+     * {@code pointerPrefix} turns the key into the JSON pointer named in the message.
+     */
+    private static void rejectInvalidExtras(
+        Map<String, Object> extras, Set<String> core, Set<String> forbidden, String pointerPrefix) {
         if (extras == null) {
             return;
         }
-        for (Map.Entry<String, Object> entry : extras.entrySet()) {
-            String key = entry.getKey();
-            if (key == null || known.contains(key) || forbidden.contains(key) || target.containsKey(key)) {
-                continue;
+        for (String key : extras.keySet()) {
+            if (key == null) {
+                throw new BabelQueueException("BabelQueue: an extension key must not be null");
             }
-            target.put(key, entry.getValue());
+            if (forbidden.contains(key)) {
+                throw new BabelQueueException(
+                    "BabelQueue: cannot encode forbidden envelope key " + pointerPrefix + key
+                        + " (message-envelope.md §10)");
+            }
+            if (core.contains(key)) {
+                throw new BabelQueueException(
+                    "BabelQueue: extension key " + pointerPrefix + key
+                        + " collides with a core envelope key and would overwrite it");
+            }
         }
     }
 
@@ -186,17 +243,24 @@ public final class EnvelopeCodec {
             return empty();
         }
 
+        // job wins unless it is blank (closed ASCII set); then the urn alias is the identity. The
+        // urn key itself is never retained; it only warns when it is dropped in favour of job.
         String job = asString(map.get("job"));
-        if (job == null || job.isBlank()) {
+        if (map.containsKey("urn")) {
             String alias = asString(map.get("urn"));
-            if (alias != null) {
+            if (isBlankAscii(job) && alias != null) {
                 job = alias;
+            } else {
+                onWarning.accept(forbiddenWarning("/urn"));
             }
         }
 
         Map<String, Object> extras = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : map.entrySet()) {
             String key = String.valueOf(entry.getKey());
+            if ("urn".equals(key)) {
+                continue;
+            }
             if (FORBIDDEN_TOP_LEVEL.contains(key)) {
                 onWarning.accept(forbiddenWarning("/" + key));
             } else if (!KNOWN_TOP_LEVEL.contains(key)) {
@@ -221,7 +285,34 @@ public final class EnvelopeCodec {
 
     /** The message URN — the canonical {@code job}, with the {@code urn} alias resolved by {@link #decode}. */
     public static String urn(Envelope envelope) {
-        return envelope.job() == null ? "" : envelope.job().strip();
+        return envelope.job() == null ? "" : stripAscii(envelope.job());
+    }
+
+    /**
+     * Whether {@code value} is {@code null}, empty or only the closed ASCII whitespace set
+     * (space, {@code \t}, {@code \n}, {@code \v}, {@code \f}, {@code \r}) — the suite's "blank"
+     * (ADR-0031 (c)). Deliberately not {@link String#isBlank()}: Unicode spaces such as U+2003 are
+     * not blank, for cross-SDK parity (GR-5).
+     */
+    static boolean isBlankAscii(String value) {
+        return value == null || stripAscii(value).isEmpty();
+    }
+
+    /** Trim only the closed ASCII whitespace set from both ends (see {@link #isBlankAscii}). */
+    static String stripAscii(String value) {
+        int start = 0;
+        int end = value.length();
+        while (start < end && isAsciiSpace(value.charAt(start))) {
+            start++;
+        }
+        while (end > start && isAsciiSpace(value.charAt(end - 1))) {
+            end--;
+        }
+        return value.substring(start, end);
+    }
+
+    private static boolean isAsciiSpace(char ch) {
+        return ch == ' ' || ch == '\t' || ch == '\n' || ch == 0x0B || ch == '\f' || ch == '\r';
     }
 
     /**
