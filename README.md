@@ -4,6 +4,8 @@
 [![Maven Central](https://img.shields.io/maven-central/v/com.babelqueue/babelqueue-core.svg)](https://central.sonatype.com/artifact/com.babelqueue/babelqueue-core)
 [![javadoc](https://javadoc.io/badge2/com.babelqueue/babelqueue-core/javadoc.svg)](https://javadoc.io/doc/com.babelqueue/babelqueue-core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Live interop](https://img.shields.io/endpoint?url=https%3A%2F%2Fbabelqueue.com%2Fbadges%2Fnightly.json)](https://babelqueue.com/compatibility/)
+[![BabelQueue conformance](https://img.shields.io/badge/BabelQueue-conformance%20matrix-10B981.svg)](https://babelqueue.com/compatibility/)
 
 > **Polyglot Queues, Simplified.** Read and write the canonical BabelQueue message
 > envelope from Java — so your Java/Spring services exchange messages with Laravel,
