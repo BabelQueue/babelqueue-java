@@ -44,7 +44,7 @@ class ConformanceTest {
 
         for (Map<String, Object> c : cases) {
             String name = (String) c.get("name");
-            tests.add(dynamicTest(name, () -> runCase(c)));
+            tests.add(dynamicTest(name, ConformanceResults.record("cases", name, () -> runCase(c))));
         }
         return tests.stream();
     }

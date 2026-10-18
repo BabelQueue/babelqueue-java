@@ -262,7 +262,7 @@ public final class Redrive {
             return new Item(messageId, env.traceId(), env.job(), reason, dlq, null, false, false);
         }
 
-        String target = opts.toQueue() != null && !opts.toQueue().isBlank()
+        String target = !EnvelopeCodec.isBlankAscii(opts.toQueue())
             ? opts.toQueue()
             : sourceQueueOf(env);
 
@@ -315,7 +315,7 @@ public final class Redrive {
 
     private static String sourceQueueOf(Envelope env) {
         DeadLetter dl = env.deadLetter();
-        if (dl != null && dl.originalQueue() != null && !dl.originalQueue().isBlank()) {
+        if (dl != null && !EnvelopeCodec.isBlankAscii(dl.originalQueue())) {
             return dl.originalQueue();
         }
         return env.meta() == null ? null : env.meta().queue();

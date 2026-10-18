@@ -71,7 +71,7 @@ public final class Outbox {
      */
     private static String queueOf(Envelope envelope) {
         Meta meta = envelope.meta();
-        if (meta != null && meta.queue() != null && !meta.queue().isBlank()) {
+        if (meta != null && !EnvelopeCodec.isBlankAscii(meta.queue())) {
             return meta.queue();
         }
         return DEFAULT_QUEUE;

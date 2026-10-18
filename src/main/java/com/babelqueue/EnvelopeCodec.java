@@ -88,14 +88,14 @@ public final class EnvelopeCodec {
         Map<String, Object> metaExtras = meta == null ? null : new LinkedHashMap<>(meta);
         rejectInvalidExtras(metaExtras, KNOWN_META, FORBIDDEN_META, "/meta/");
 
-        String resolvedUrn = urn == null ? "" : urn.strip();
+        String resolvedUrn = urn == null ? "" : stripAscii(urn);
         if (resolvedUrn.isEmpty()) {
             throw new BabelQueueException(
                 "A polyglot message must expose a stable, non-empty URN so consumers "
                     + "can identify it without any class name.");
         }
 
-        String trace = traceId == null ? "" : traceId.strip();
+        String trace = traceId == null ? "" : stripAscii(traceId);
         if (trace.isEmpty()) {
             trace = UUID.randomUUID().toString();
         }
@@ -245,7 +245,15 @@ public final class EnvelopeCodec {
 
         // job wins unless it is blank (closed ASCII set); then the urn alias is the identity. The
         // urn key itself is never retained; it only warns when it is dropped in favour of job.
-        String job = asString(map.get("job"));
+        // A non-string job (null, number, boolean, object, array) is ignored with a warning and
+        // never retained (ADR-0032 section 6); a blank string job falls back silently.
+        Object rawJob = map.get("job");
+        String job = asString(rawJob);
+        if (map.containsKey("job") && !(rawJob instanceof String)) {
+            boolean aliasUsable = !isBlankAscii(asString(map.get("urn")));
+            onWarning.accept("BabelQueue: ignored /job because it is not a string"
+                + (aliasUsable ? "; falling back to the urn alias" : ""));
+        }
         if (map.containsKey("urn")) {
             String alias = asString(map.get("urn"));
             if (isBlankAscii(job) && alias != null) {
@@ -293,9 +301,20 @@ public final class EnvelopeCodec {
      * (space, {@code \t}, {@code \n}, {@code \v}, {@code \f}, {@code \r}) — the suite's "blank"
      * (ADR-0031 (c)). Deliberately not {@link String#isBlank()}: Unicode spaces such as U+2003 are
      * not blank, for cross-SDK parity (GR-5).
+     *
+     * @param value the string to test, or {@code null}
+     * @return {@code true} when {@code value} is {@code null}, empty or ASCII-whitespace only
      */
-    static boolean isBlankAscii(String value) {
-        return value == null || stripAscii(value).isEmpty();
+    public static boolean isBlankAscii(String value) {
+        if (value == null) {
+            return true;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            if (!isAsciiSpace(value.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Trim only the closed ASCII whitespace set from both ends (see {@link #isBlankAscii}). */
@@ -330,7 +349,7 @@ public final class EnvelopeCodec {
         if (envelope.data() == null) {
             return false;
         }
-        return envelope.traceId() != null && !envelope.traceId().isBlank();
+        return !isBlankAscii(envelope.traceId());
     }
 
     private static Envelope empty() {

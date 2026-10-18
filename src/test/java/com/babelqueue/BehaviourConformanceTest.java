@@ -46,14 +46,14 @@ class BehaviourConformanceTest {
 
     @TestFactory
     Stream<DynamicTest> roundtrip() {
-        return cases("roundtrip").stream().map(c -> dynamicTest(name(c), () -> {
+        return cases("roundtrip").stream().map(c -> dynamicTest(name(c), ConformanceResults.record("roundtrip", name(c), () -> {
             // conformance/README.md (v1.4.0): "expect_attempts" and "expect_preserved" are required on every
             // roundtrip case (the other fields are optional). A case that loses one must fail, not silently verify less.
             assertNotNull(c.get("expect_attempts"), "roundtrip case lacks mandatory expect_attempts: " + name(c));
             assertNotNull(c.get("expect_preserved"), "roundtrip case lacks mandatory expect_preserved: " + name(c));
             List<String> violations = roundtripViolations(c, fixture(c));
             assertTrue(violations.isEmpty(), "roundtrip violations: " + violations);
-        }));
+        })));
     }
 
     /**
@@ -107,7 +107,7 @@ class BehaviourConformanceTest {
     }
 
     /** Violations of {@code expect_preserved}: each pointer must resolve and equal the given value. */
-    private static List<String> preservedViolations(Object out, Map<String, Object> preserved) {
+    static List<String> preservedViolations(Object out, Map<String, Object> preserved) {
         List<String> violations = new ArrayList<>();
         if (preserved == null) {
             return violations;
@@ -143,7 +143,7 @@ class BehaviourConformanceTest {
 
     @TestFactory
     Stream<DynamicTest> dataShape() {
-        return cases("data_shape").stream().map(c -> dynamicTest(name(c), () -> {
+        return cases("data_shape").stream().map(c -> dynamicTest(name(c), ConformanceResults.record("data_shape", name(c), () -> {
             String mode = (String) c.get("mode");
             if ("encode".equals(mode)) {
                 Envelope env = EnvelopeCodec.make(
@@ -164,15 +164,15 @@ class BehaviourConformanceTest {
             } else {
                 fail("unknown data_shape mode: " + mode);
             }
-        }));
+        })));
     }
 
     @TestFactory
     Stream<DynamicTest> forbiddenKeys() {
-        return cases("forbidden_keys").stream().map(c -> dynamicTest(name(c), () -> {
+        return cases("forbidden_keys").stream().map(c -> dynamicTest(name(c), ConformanceResults.record("forbidden_keys", name(c), () -> {
             List<String> violations = forbiddenKeyViolations(c, fixture(c));
             assertTrue(violations.isEmpty(), "forbidden_keys violations: " + violations);
-        }));
+        })));
     }
 
     /**
@@ -207,15 +207,15 @@ class BehaviourConformanceTest {
         Map<String, Object> section = section("payload_schema_unicode");
         Map<String, Object> schema = (Map<String, Object>) section.get("schema");
         assertNotNull(schema, "payload_schema_unicode.schema");
-        return cases("payload_schema_unicode").stream().map(c -> dynamicTest(name(c), () -> {
+        return cases("payload_schema_unicode").stream().map(c -> dynamicTest(name(c), ConformanceResults.record("payload_schema_unicode", name(c), () -> {
             boolean isValid = PayloadValidator.validate(schema, c.get("data")) == null;
             assertEquals(c.get("valid"), isValid, "validator verdict");
-        }));
+        })));
     }
 
     @TestFactory
     Stream<DynamicTest> extensionWrite() {
-        return cases("extension_write").stream().map(c -> dynamicTest(name(c), () -> {
+        return cases("extension_write").stream().map(c -> dynamicTest(name(c), ConformanceResults.record("extension_write", name(c), () -> {
             Envelope made = EnvelopeCodec.make(
                 (String) c.get("urn"),
                 (Map<String, Object>) c.get("data"),
@@ -236,14 +236,14 @@ class BehaviourConformanceTest {
                 violations.add("/attempts must be 1 after the hop, got " + describe(resolve(reemitted, "/attempts")));
             }
             assertTrue(violations.isEmpty(), "re-emit chain: " + violations);
-        }));
+        })));
     }
 
     @TestFactory
     Stream<DynamicTest> encodeReject() {
-        return cases("encode_reject").stream().map(c -> dynamicTest(name(c), () -> {
+        return cases("encode_reject").stream().map(c -> dynamicTest(name(c), ConformanceResults.record("encode_reject", name(c), () -> {
             // A JSON object cannot express a repeated key and make() takes one map per call.
-            Assumptions.assumeTrue(!c.containsKey("meta_entries"), "repeated meta keys are inexpressible in Java");
+            Assumptions.assumeTrue(!c.containsKey("meta_entries"), "ADR-0031: repeated meta keys are inexpressible in Java (make() takes one map per call)");
             assertEquals("reject", c.get("expect"));
 
             BabelQueueException ex = assertThrows(BabelQueueException.class, () -> {
@@ -275,7 +275,7 @@ class BehaviourConformanceTest {
             String offending = (String) c.get("offending_key");
             assertTrue(offending == null || ex.getMessage().contains(offending),
                 "message should name " + offending + ": " + ex.getMessage());
-        }));
+        })));
     }
 
     // --- the runner must really detect violations (a runner that ignores a field passes everything) ---
