@@ -9,6 +9,23 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-19
+
+Implements ADR-0032 (conformance packaging, results format, ASCII trim and the non-string `job` rule).
+The envelope stays at `schema_version: 1`.
+
+### Changed
+- Trim and blank checks in `make` (`urn`, `trace_id`), `accepts`, `Redrive` and the outbox use the closed
+  ASCII set (space, `\t`, `\n`, `\v`, `\f`, `\r`); Unicode whitespace that `String.strip()` removed is no
+  longer trimmed (ADR-0032 section 5). `EnvelopeCodec.isBlankAscii` is now public.
+- Decode: a non-string `job` (`null`, number, boolean, object, array) is ignored with a warning and a valid
+  string `urn` takes over (ADR-0032 section 6).
+
+### Added
+- Conformance runner covers the v1.5.0 sections (`trim`, `job_type`, `traceparent`) and writes
+  `results.json` (ADR-0032 section 2) when `BQ_CONFORMANCE_RESULTS` is set. CI validates it and the release
+  attaches it as an asset. CI fetches and verifies the conformance v1.5.0 release asset.
+
 ## [1.11.0] - 2026-10-17
 
 Implements ADR-0031 (unknown-key preservation, producer `meta` write API, encode-reject, `urn` alias
