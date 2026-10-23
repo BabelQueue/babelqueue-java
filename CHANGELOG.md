@@ -9,6 +9,16 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+### Added
+- `RetryBackoff` (ADR-0034 section 9): worker-side retry backoff helper,
+  `d(n) = min(retry_backoff_max, retry_backoff * retry_backoff_multiplier^(n-1))` with optional
+  `full` jitter; defaults (`0`, `1`, `0`, `none`) yield `0` s so unconfigured behaviour is unchanged.
+  A zero base delay stays `0` even when `multiplier^(n-1)` overflows to infinity.
+  Locked by the `retry_backoff` conformance section.
+
+### Changed
+- Vendored conformance bumped to v1.6.0; CI pins `fetch.sh` by SHA-256 (`BQ_FETCH_SH_SHA256`).
+
 ## [1.12.0] - 2026-10-19
 
 Implements ADR-0032 (conformance packaging, results format, ASCII trim and the non-string `job` rule).
