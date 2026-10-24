@@ -9,6 +9,8 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-24
+
 ### Added
 - `RetryBackoff` (ADR-0034 section 9): worker-side retry backoff helper,
   `d(n) = min(retry_backoff_max, retry_backoff * retry_backoff_multiplier^(n-1))` with optional
