@@ -15,8 +15,12 @@ The envelope wire format is versioned separately by `meta.schema_version`
   `full` jitter; defaults (`0`, `1`, `0`, `none`) yield `0` s so unconfigured behaviour is unchanged.
   A zero base delay stays `0` even when `multiplier^(n-1)` overflows to infinity.
   Locked by the `retry_backoff` conformance section.
+- `PoisonRecord.build(body, deadLetter)` (ADR-0035): the DLQ record of a poison body; a strict JSON object is
+  spliced byte-for-byte, anything else becomes `{"raw", "raw_encoding"?, "dead_letter"}` with lossless base64 for
+  invalid UTF-8 (never U+FFFD). Locked by the core-scope `poison_dlq` conformance section.
 
 ### Changed
+- `PoisonRecord.build`: the `dead_letter` argument is now validated as a single JSON object and rejected otherwise. (`IllegalArgumentException`).
 - Vendored conformance bumped to v1.6.0; CI pins `fetch.sh` by SHA-256 (`BQ_FETCH_SH_SHA256`).
 
 ## [1.12.0] - 2026-10-19
