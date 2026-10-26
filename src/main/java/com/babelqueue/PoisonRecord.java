@@ -5,6 +5,8 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Builds the DLQ record of a poison body (ADR-0035, error-handling.md section 6).
@@ -16,11 +18,44 @@ import java.util.Base64;
  * "dead_letter": ...}}: {@code raw} is the body as plain text when it is valid UTF-8, otherwise the standard padded
  * base64 of the exact bytes with {@code "raw_encoding": "base64"}. U+FFFD substitution never happens.
  *
+ * <p>Transports should call {@link #build(byte[], String, int, String, String)}: it assembles the ADR-0035
+ * {@code dead_letter} block itself (so no transport hand-builds it) and delegates here. The two-argument
+ * {@link #build(byte[], String)} stays for callers that already hold the block JSON.
+ *
  * <p>The strict scan is iterative (no recursion), so a body nested thousands of levels deep cannot overflow the stack.
  */
 public final class PoisonRecord {
 
     private PoisonRecord() {
+    }
+
+    /**
+     * Builds the DLQ record of a poison body, assembling the ADR-0035 {@code dead_letter} block itself. Transports
+     * should use this instead of hand-building the block.
+     *
+     * <p>The block members are written in this order: {@code reason} ({@code "poison"}), {@code error},
+     * {@code exception}, {@code failed_at} (epoch milliseconds, taken now), {@code original_queue}, {@code attempts}
+     * and {@code lang} ({@link EnvelopeCodec#SOURCE_LANG}). A {@code null} {@code error} or {@code exception} is
+     * written as JSON {@code null}, not omitted. The block is then spliced or wrapped by
+     * {@link #build(byte[], String)}.
+     *
+     * @param body          the exact record value bytes
+     * @param originalQueue the queue the body was consumed from
+     * @param attempts      informational delivery attempts so far
+     * @param error         the failure message, or {@code null}
+     * @param exception     the failure type name, or {@code null}
+     * @return the DLQ record JSON text
+     */
+    public static String build(byte[] body, String originalQueue, int attempts, String error, String exception) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("reason", "poison");
+        block.put("error", error);
+        block.put("exception", exception);
+        block.put("failed_at", System.currentTimeMillis());
+        block.put("original_queue", originalQueue);
+        block.put("attempts", attempts);
+        block.put("lang", EnvelopeCodec.SOURCE_LANG);
+        return build(body, JsonValues.encode(block));
     }
 
     /**
