@@ -9,6 +9,8 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-10-26
+
 ### Added
 - `PoisonRecord.build(body, originalQueue, attempts, error, exception)` (ADR-0035): builds the poison `dead_letter`
   block itself (`reason`, `error`, `exception`, `failed_at`, `original_queue`, `attempts`, `lang`) and delegates to
