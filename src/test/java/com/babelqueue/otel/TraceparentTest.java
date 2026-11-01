@@ -119,7 +119,7 @@ class TraceparentTest {
                 carrier.putAll(headers);
             });
 
-        SpanData producer = spanNamed("publish urn:babel:orders:created");
+        SpanData producer = spanNamed("send default");
         assertEquals(SpanKind.PRODUCER, producer.getKind());
         // traceparent rides out of band — never inside the frozen envelope.
         assertFalse(EnvelopeCodec.encode(sent[0]).contains("traceparent"));
@@ -133,7 +133,7 @@ class TraceparentTest {
         Tracing.wrapHandler(tracer, e -> called[0] = true, () -> carrier).handle(sent[0]);
         assertTrue(called[0]);
 
-        SpanData consumer = spanNamed("process urn:babel:orders:created");
+        SpanData consumer = spanNamed("process default");
         assertEquals(SpanKind.CONSUMER, consumer.getKind());
         // same trace, and the consumer's parent IS the producer span (true cross-hop link).
         assertEquals(producer.getSpanContext().getTraceId(), consumer.getSpanContext().getTraceId());
@@ -148,7 +148,7 @@ class TraceparentTest {
         // empty carrier — no traceparent — must behave exactly like the v0.1 path.
         Tracing.wrapHandler(tracer, e -> { }, HashMap::new).handle(env);
 
-        SpanData consumer = spanNamed("process urn:babel:orders:created");
+        SpanData consumer = spanNamed("process orders");
         assertEquals(Tracing.traceIdOf(TRACE_ID), consumer.getSpanContext().getTraceId());
         // the parent is the deterministic trace_id-derived remote parent, not a producer span.
         assertTrue(consumer.getParentSpanContext().isValid());
@@ -162,7 +162,7 @@ class TraceparentTest {
 
         Tracing.wrapHandler(tracer, e -> { }, () -> garbage).handle(env);
 
-        SpanData consumer = spanNamed("process urn:babel:orders:created");
+        SpanData consumer = spanNamed("process orders");
         // fell back to the trace_id-derived trace, NOT a trace from the garbage header.
         assertEquals(Tracing.traceIdOf(TRACE_ID), consumer.getSpanContext().getTraceId());
     }
@@ -174,7 +174,7 @@ class TraceparentTest {
         // The v0.1 Sender overload (no header channel) must not propagate a traceparent...
         String id = Tracing.publish(tracer, "urn:babel:orders:created", Map.of(), e -> sent[0] = e);
 
-        SpanData producer = spanNamed("publish urn:babel:orders:created");
+        SpanData producer = spanNamed("send default");
         assertEquals(id, sent[0].meta().id());
         // ...but it still stamps the trace_id (v0.1 correlation), and the envelope is header-free.
         assertEquals(producer.getSpanContext().getTraceId(), Tracing.traceIdOf(sent[0].traceId()));
@@ -189,7 +189,7 @@ class TraceparentTest {
             (envelope, headers) -> sent[0] = envelope);
 
         assertEquals("default", sent[0].meta().queue());
-        assertEquals(SpanKind.PRODUCER, spanNamed("publish urn:babel:orders:created").getKind());
+        assertEquals(SpanKind.PRODUCER, spanNamed("send default").getKind());
     }
 
     @Test
@@ -199,7 +199,7 @@ class TraceparentTest {
         // The 2-arg overload delegates to a null supplier — pure v0.1 behaviour, no regression.
         Tracing.wrapHandler(tracer, e -> { }).handle(env);
 
-        SpanData consumer = spanNamed("process urn:babel:orders:created");
+        SpanData consumer = spanNamed("process orders");
         assertEquals(Tracing.traceIdOf(TRACE_ID), consumer.getSpanContext().getTraceId());
         assertNotEquals("0000000000000000", consumer.getParentSpanContext().getSpanId());
     }

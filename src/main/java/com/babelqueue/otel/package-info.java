@@ -3,8 +3,9 @@
  * of the Go {@code babelqueue-go/otel}, Python {@code babelqueue.otel} and Node
  * {@code @babelqueue/core/otel} modules.
  *
- * <p>{@link com.babelqueue.otel.Tracing} emits a {@code CONSUMER} span per handled message and a
- * {@code PRODUCER} span per publish, propagating the trace across every hop and SDK at two layered
+ * <p>{@link com.babelqueue.otel.Tracing} emits a {@code CONSUMER} span {@code process <queue>} per
+ * handled message and a {@code PRODUCER} span {@code send <queue>} per publish (OpenTelemetry
+ * semantic conventions {@value com.babelqueue.otel.Tracing#SEMCONV_VERSION}, ADR-0038), propagating the trace across every hop and SDK at two layered
  * levels:
  *
  * <ul>
@@ -19,6 +20,23 @@
  *       present it falls back to the v0.1 {@code trace_id} parent — a strict, backward-compatible
  *       upgrade.</li>
  * </ul>
+ *
+ * <p><b>Span shape (ADR-0038).</b> {@code messaging.system} is the broker name passed through
+ * {@link com.babelqueue.otel.Tracing.Options#system(String)} ({@code redis}, {@code rabbitmq},
+ * {@code aws_sqs}, {@code servicebus}, {@code pulsar}, {@code kafka}, {@code activemq}); without it
+ * the <b>deprecated</b> default {@code babelqueue} is written. BabelQueue identity lives in the
+ * {@code babelqueue.urn}, {@code babelqueue.schema_version} and {@code babelqueue.attempts}
+ * attributes. {@code messaging.operation} and {@code messaging.babelqueue.attempts} are dual-emitted
+ * for one MINOR and then removed. Create your tracer with
+ * {@link com.babelqueue.otel.Tracing#SCHEMA_URL}.
+ *
+ * <p><b>Metrics (ADR-0039).</b> {@link com.babelqueue.otel.Metrics} records
+ * {@code messaging.process.duration}, {@code messaging.client.sent.messages},
+ * {@code messaging.client.consumed.messages}, {@code babelqueue.retries} and
+ * {@code babelqueue.dlq.messages} through a caller-supplied {@code Meter}
+ * ({@link com.babelqueue.otel.Tracing.Options#meter(io.opentelemetry.api.metrics.Meter)}); without a
+ * meter nothing is recorded. The dead-letter counter is fed by a
+ * {@link com.babelqueue.DeadLetterObserver} (see {@link com.babelqueue.otel.Metrics#deadLetterObserver}).
  *
  * <p>The wire envelope is untouched (GR-1, {@code schema_version} stays {@code 1}), and
  * {@code io.opentelemetry:opentelemetry-api} (which itself ships OTel's W3C propagator) is declared

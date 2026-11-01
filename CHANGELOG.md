@@ -9,6 +9,62 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-11-01
+
+Implements ADR-0038 (OpenTelemetry semantic-conventions alignment) and ADR-0039 (standard metrics and the
+dead-letter observer seam) in the `com.babelqueue.otel` module, and ADR-0036 decision 4 (body classification) with the
+additive `BodyVerdict` API. The envelope stays at `schema_version: 1`; nothing changes on the wire.
+
+### Added
+- `Tracing.Options` (`system`, `consumerGroup`, `meter`) and the overloads that take it:
+  `Tracing.wrapHandler(tracer, handler, headers, options)` and `Tracing.publish(tracer, urn, data, queue, send, options)`
+  (`Sender` or `HeaderSender`). `system` is the broker name written to `messaging.system` (`redis`, `rabbitmq`,
+  `aws_sqs`, `servicebus`, `pulsar`, `kafka`, `activemq`; any other value is written as given), `consumerGroup` is
+  `messaging.consumer.group.name`. Existing signatures are unchanged.
+- `Tracing.SEMCONV_VERSION` (`1.44.0`) and `Tracing.SCHEMA_URL` (`https://opentelemetry.io/schemas/1.44.0`): create
+  your `Tracer` and `Meter` with the schema URL.
+- Standard metrics (`Metrics`, opt-in through `Tracing.Options.meter(Meter)`): `messaging.process.duration`
+  (histogram, `s`), `messaging.client.sent.messages`, `messaging.client.consumed.messages`, `babelqueue.retries` and
+  `babelqueue.dlq.messages` (counters, `{message}`). Attributes are `messaging.system`, `messaging.operation.name`,
+  `messaging.destination.name` (when known) and `error.type` (on failure) only; never the URN, ids or `trace_id`.
+- Core dead-letter observer seam (ADR-0039 section 5.1): `com.babelqueue.DeadLetterObserver` (one method,
+  `onDeadLetter(DeadLetterEvent)`, plus the isolating `DeadLetterObserver.notifySafely`) and
+  `com.babelqueue.DeadLetterEvent(queue, deadLetterQueue, reason)`. `Metrics#deadLetterObserver(system)` is the OTel
+  observer that increments `babelqueue.dlq.messages`. The core has no consume runtime, so wiring it into the transport
+  consumers is done in the transport artifacts.
+- `error.type` (`e.getClass().getName()`) on a failed publish or handler span, next to the recorded exception and the
+  `ERROR` status.
+- A one-time `WARNING` (logger `com.babelqueue.otel.Tracing`, bounded, per distinct value) when the OTel mapping
+  hashes a `trace_id` that is not a UUID. The `trace_id` itself is still forwarded unchanged.
+- Vendored conformance bumped to v1.9.0 (`span-shape`, `trace-id`, `metrics` sections run by `OtelConformanceTest`).
+- `com.babelqueue.BodyVerdict.classify(String)` (ADR-0036 decision 4, ADR-0032 section 6): a strict, never-throwing
+  classifier that returns a `BodyVerdict.Result` (`Kind.OK`, or `Kind.POISON` with a `cause`). A body is `OK` when it
+  decodes into an envelope with a valid identity; it is `POISON` when it is not one JSON object, when a known member has
+  the wrong type (for example `attempts: "3"` or `data: []`; the cause names the member path such as `meta.id`), when it
+  nests deeper than `BodyVerdict.MAX_DEPTH` (256), or when neither `job` nor `urn` is a non-blank string. The scan is
+  iterative and the limit is a fixed constant, so the verdict never depends on the thread's stack size. It lets a
+  consumer park a malformed body on the poison route. The depth limit differs per SDK (Go and Node 10000, PHP 511,
+  .NET 64, Python interpreter-dependent), recorded in ADR-0036 decision 4 "SDK note". **`EnvelopeCodec.decode` is unchanged**: it stays lenient
+  about member types, with the same signatures and behaviour.
+- `IdentityVerdictConformanceTest` runs the core-scope `identity_verdict` section (97 cases, all passing) and records
+  it in `results.json`; it was the last section the Java core did not run.
+
+### Changed
+- **Dashboard-breaking (ADR-0038 section 5), no overlap period:**
+  - span names are `send <queue>` / `process <queue>` (the bare `send` / `process` with a blank queue) instead of
+    `publish <urn>` / `process <urn>`; the URN is the new `babelqueue.urn` attribute;
+  - the producer's `messaging.destination.name` is the queue the envelope is published to, not the URN;
+  - `messaging.system` is the broker name when `Options.system(...)` is given.
+- New span attributes: `messaging.operation.type`, `messaging.operation.name`, `babelqueue.urn`,
+  `babelqueue.schema_version`, `babelqueue.attempts`. The producer writes `messaging.message.id` and
+  `messaging.message.conversation_id` as soon as the envelope is built, so they are also on a failed publish.
+
+### Deprecated
+- Without `Options.system(...)`, `messaging.system` stays `babelqueue`. This default is deprecated: pass the broker name.
+- `messaging.operation` and `messaging.babelqueue.attempts` are still written next to their replacements
+  (`messaging.operation.type` / `messaging.operation.name`, `babelqueue.attempts`) for this MINOR and **will be removed
+  in the next MINOR**.
+
 ## [1.14.0] - 2026-10-26
 
 ### Added
