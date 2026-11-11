@@ -9,6 +9,32 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+Brings the opt-in payload validator (ADR-0024, `com.babelqueue.schema`) to parity with the other SDKs, as locked by the
+`payload_schema_keywords` section of conformance 1.10.0. The envelope stays at `schema_version: 1`; nothing changes on
+the wire, and the validator remains zero-dependency (GR-7).
+
+### Added
+- Union `type`: `"type": ["string", "null"]` is valid when the value matches ANY listed type, and the keywords of the
+  matching type (`minLength`, `minimum`, `properties`, ...) still apply. `integer` accepts every whole-valued number
+  (`1.0`, `1e2`, `BigDecimal("1.00")`).
+- `maxLength` (counted in Unicode code points, like `minLength`).
+- Registration-time warnings for keywords outside the supported subset: `PayloadValidator.warnings(schema)` returns one
+  `SchemaWarning(pointer, keyword)` per occurrence (RFC 6901 pointer of the schema object carrying the keyword), and
+  `MapProvider` reports them when the schemas are registered, each as a `RegisteredSchemaWarning(urn, warning)` so the
+  operator can tell which URN's schema carries it, through a `Consumer<RegisteredSchemaWarning>` hook
+  (`new MapProvider(schemas, onWarning)`; `System.Logger` at `WARNING` by default) and keeps them in
+  `MapProvider.warnings()`. Annotation keywords (`$schema`, `$id`, `title`, `description`, `examples`, `default`,
+  `$comment`, `x-*`) never warn.
+
+### Fixed
+- `const` / `enum` compare numbers by mathematical value, recursively inside arrays and objects: `1`, `1.0` and `1e0` are
+  equal and `2.5` equals `2.50` whatever the `Number` subtype (`Long`, `Integer`, `Double`, `BigInteger`, `BigDecimal`, ...).
+  A boolean or a string is still never equal to a number. Previously a `Long` const never matched a `Double` value.
+
+### Changed
+- Vendored conformance suite bumped to 1.10.0 (new `payload_schema_keywords` section, run by `PayloadSchemaConformanceTest`
+  and recorded in `results.json`).
+
 ## [1.15.0] - 2026-11-01
 
 Implements ADR-0038 (OpenTelemetry semantic-conventions alignment) and ADR-0039 (standard metrics and the
