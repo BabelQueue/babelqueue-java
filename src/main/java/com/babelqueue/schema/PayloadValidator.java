@@ -209,17 +209,31 @@ public final class PayloadValidator {
         return null;
     }
 
+    /**
+     * A {@code minLength}/{@code maxLength} bound truncated toward zero (2.9 -> 2, -0.5 -> 0), like Go,
+     * PHP and Python. {@code (long)} of a double truncates and saturates instead of wrapping. A missing,
+     * non-numeric or non-finite (NaN / +-Infinity) bound is ignored ({@code null}).
+     */
+    private static Long lengthBound(Object bound) {
+        if (!(bound instanceof Number number)) {
+            return null;
+        }
+        double d = number.doubleValue();
+        return Double.isFinite(d) ? (long) d : null;
+    }
+
     private static String checkString(Map<?, ?> schema, Object value, String path) {
         if (!(value instanceof String str)) {
             return violation(path, "not_a_string");
         }
         // JSON Schema counts string length in Unicode code points, not UTF-16 units.
-        if (schema.get("minLength") instanceof Number min
-            && str.codePointCount(0, str.length()) < min.intValue()) {
+        int length = str.codePointCount(0, str.length());
+        Long min = lengthBound(schema.get("minLength"));
+        if (min != null && length < min) {
             return violation(path, "below_min_length");
         }
-        if (schema.get("maxLength") instanceof Number max
-            && str.codePointCount(0, str.length()) > max.doubleValue()) {
+        Long max = lengthBound(schema.get("maxLength"));
+        if (max != null && length > max) {
             return violation(path, "above_max_length");
         }
         return null;
