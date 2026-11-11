@@ -30,6 +30,10 @@ the wire, and the validator remains zero-dependency (GR-7).
 - `const` / `enum` compare numbers by mathematical value, recursively inside arrays and objects: `1`, `1.0` and `1e0` are
   equal and `2.5` equals `2.50` whatever the `Number` subtype (`Long`, `Integer`, `Double`, `BigInteger`, `BigDecimal`, ...).
   A boolean or a string is still never equal to a number. Previously a `Long` const never matched a `Double` value.
+- A fractional `maxLength` is truncated toward zero (`2.9` is `2`, `-0.5` is `0`) before the comparison, like `minLength` here and the
+  Go, PHP and Python validators; it was compared as a raw double, which only differed for a negative fractional bound.
+  A non-finite `minLength` / `maxLength` (`NaN`, `±Infinity`; only reachable from a hand-built schema) is ignored, and a
+  `Long` bound above the `int` range no longer wraps (`minLength` used `intValue()`).
 
 ### Changed
 - Vendored conformance suite bumped to 1.10.0 (new `payload_schema_keywords` section, run by `PayloadSchemaConformanceTest`

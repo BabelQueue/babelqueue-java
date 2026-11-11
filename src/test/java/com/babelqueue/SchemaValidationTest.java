@@ -158,6 +158,39 @@ class SchemaValidationTest {
     }
 
     @Test
+    void fractionalLengthBoundsAreTruncatedTowardZero() {
+        Map<String, Object> min = json("{\"type\":\"string\",\"minLength\":2.5}");
+        assertNull(PayloadValidator.validate(min, "ab"));
+        assertNotNull(PayloadValidator.validate(min, "a"));
+
+        Map<String, Object> max = json("{\"type\":\"string\",\"maxLength\":2.9}");
+        assertNull(PayloadValidator.validate(max, "ab"));
+        assertNotNull(PayloadValidator.validate(max, "abc"));
+
+        // A negative fractional bound truncates to 0: only the empty string fits.
+        Map<String, Object> negMax = json("{\"type\":\"string\",\"maxLength\":-0.5}");
+        assertNull(PayloadValidator.validate(negMax, ""));
+        assertNotNull(PayloadValidator.validate(negMax, "a"));
+        Map<String, Object> negMin = json("{\"type\":\"string\",\"minLength\":-0.5}");
+        assertNull(PayloadValidator.validate(negMin, ""));
+    }
+
+    @Test
+    void nonFiniteAndOversizedLengthBoundsAreHandledLikeTheOtherSdks() {
+        for (String keyword : new String[] {"minLength", "maxLength"}) {
+            for (double bound : new double[] {Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
+                Map<String, Object> schema = Map.of("type", "string", keyword, bound);
+                for (String text : new String[] {"", "a", "abc"}) {
+                    assertNull(PayloadValidator.validate(schema, text), keyword + "=" + bound + " must be ignored");
+                }
+            }
+        }
+        // A Long bound above the int range used to wrap through intValue(): 4294967298 is not 2.
+        assertNotNull(PayloadValidator.validate(Map.of("type", "string", "minLength", 4294967298L), "ab"));
+        assertNull(PayloadValidator.validate(Map.of("type", "string", "maxLength", 4294967298L), "abc"));
+    }
+
+    @Test
     void maxLengthCountsCodePoints() {
         Map<String, Object> s = json("{\"type\":\"string\",\"maxLength\":3}");
         assertNull(PayloadValidator.validate(s, "\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00"));
